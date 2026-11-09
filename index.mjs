@@ -1,0 +1,255 @@
+// Muse (Meta) provider plugin for Magpie and OpenCode.
+//
+// Sign-in is Meta's device-code OAuth (the same flow CLIProxyAPI uses),
+// then an API key is minted from the DCA token and every chat request goes
+// to Meta's Responses API.
+//
+// The request path is deliberately thin. Magpie's gateway already
+// translates whatever the agent sent into the API the model speaks —
+// `npm: "@ai-sdk/openai"` makes that the OpenAI Responses API, so the
+// request this plugin's `fetch` receives IS a Responses request. The fetch
+// only signs it, normalizes two fields Meta is strict about (see below),
+// and passes the answer back untouched. There is no hand-rolled
+// protocol translation here: the gateway's own translation handles
+// messages, tools, images, reasoning summaries and structured output.
+//
+// Scaffold follows the Nous Portal plugin's shape (config /
+// provider.models / auth.loader / auth.refresh / auth.methods), so
+// Magpie's host and OpenCode 1.x/2.x load it the same way.
+import { ID, API_BASE, BUILD_USER_AGENT, CLIENT_HEADER, AuthError, createAuth, metadata } from "./oauth.mjs"
+
+const NPM = "@ai-sdk/openai"
+
+// Static model registry — Meta exposes no live catalog for this API, so
+// the list mirrors CLIProxyAPI's registry (models.json, "meta" block).
+// Context/output token counts are the registry's.
+const MODELS = [
+  {
+    id: "muse-wonder-1.0", name: "Muse Wonder 1.0",
+    limit: { context: 1007997, output: 128000 },
+    input: ["text", "image", "audio", "video"],
+    contributor: true,
+  },
+  {
+    id: "muse-wonder-full-1.0", name: "Muse Wonder Full 1.0",
+    limit: { context: 1007997, output: 128000 },
+    input: ["text", "image", "audio", "video"],
+    contributor: true,
+  },
+  {
+    id: "muse-spark-1.3", name: "Muse Spark 1.3",
+    limit: { context: 1048576, output: 65536 },
+    input: ["text", "image"],
+    contributor: true,
+  },
+  {
+    id: "muse-spark-1.2", name: "Muse Spark 1.2",
+    limit: { context: 1048576, output: 65536 },
+    input: ["text", "image"],
+    contributor: true,
+  },
+  {
+    id: "muse-spark-1.1", name: "Muse Spark 1.1",
+    limit: { context: 1048576, output: 65536 },
+    input: ["text", "image"],
+    contributor: false,
+  },
+]
+
+const EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"]
+
+// variants carry the effort the way Magpie itself writes them for
+// OpenCode (internal/agent/agents.go: openCodeVariant): the variant's
+// key is the level, its setting asks the gateway for that effort. The
+// gateway then sends `reasoning: {effort, summary: "auto"}` on the
+// Responses request (internal/gateway/responses.go).
+function variants() {
+  return Object.fromEntries(EFFORTS.map((e) => [e, { reasoningEffort: e }]))
+}
+
+// Config-bootstrap model: the docs' simple format (name, limit,
+// reasoning, tool_call, modalities, variants). The host normalizes it;
+// the models hook below returns the full OpenCode Model shape.
+function configModel(base, suffix, name) {
+  return {
+    name,
+    limit: base.limit,
+    reasoning: true,
+    tool_call: true,
+    modalities: { input: base.input },
+    variants: variants(),
+  }
+}
+
+function configCatalog() {
+  const out = {}
+  for (const base of MODELS) {
+    out[base.id] = configModel(base, "", base.name)
+    if (base.contributor) out[base.id + "-contributor"] = configModel(base, "-contributor", base.name + " (Contributor)")
+  }
+  return out
+}
+
+// Models-hook model: OpenCode's Model shape (docs: "Each account's
+// models" — id, name, api, limit, capabilities, cost, variants,
+// release_date, status).
+function modelEntry(base, suffix, name) {
+  const id = base.id + suffix
+  const input = { text: true, image: false, audio: false, video: false, pdf: false }
+  for (const m of base.input) input[m] = true
+  return {
+    id, name,
+    api: { id, url: API_BASE, npm: NPM },
+    status: "active", headers: {}, options: {},
+    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    limit: base.limit,
+    capabilities: {
+      temperature: true, reasoning: true,
+      attachment: base.input.includes("image") || base.input.includes("video") || base.input.includes("audio"),
+      toolcall: true,
+      input,
+      output: { text: true, image: false, audio: false, video: false, pdf: false },
+      interleaved: false,
+    },
+    release_date: "", variants: variants(),
+  }
+}
+
+function catalog() {
+  const out = {}
+  for (const base of MODELS) {
+    out[base.id] = modelEntry(base, "", base.name)
+    if (base.contributor) out[base.id + "-contributor"] = modelEntry(base, "-contributor", base.name + " (Contributor)")
+  }
+  return out
+}
+
+// Fields Meta's Responses API is known to refuse, per CLIProxyAPI's meta
+// executor (which deletes the same five before sending). The gateway's
+// own Responses builder only ever emits client_metadata of these, but
+// the strip costs nothing and covers anything else that reaches us.
+const DROP_FIELDS = ["generate", "prompt_cache_retention", "safety_identifier", "stream_options", "client_metadata"]
+
+// normalizeRequest applies the two normalizations Meta needs on a
+// gateway-built Responses request. Pure: takes the parsed body, returns
+// the body to send. (1) Drop the fields above. (2) Ensure `instructions`
+// exists: CLIProxyAPI's normalizeCodexInstructions sets it to "" when
+// absent, and the gateway only sends it when there is a system prompt.
+export function normalizeRequest(body) {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return body
+  const out = { ...body }
+  for (const f of DROP_FIELDS) delete out[f]
+  if (!("instructions" in out) || out.instructions == null) out.instructions = ""
+  return out
+}
+
+export async function MuseAuthPlugin({ client }) {
+  const auth = createAuth(client)
+
+  async function signedFetch(getAuth, input, init) {
+    const req = new Request(input, init)
+    // Refuse foreign destinations before even refreshing: the minted key
+    // must only ever go to Meta's own API. The gateway sends Responses
+    // requests to the loader's baseURL + "/responses".
+    const u = new URL(req.url)
+    if (u.origin !== new URL(API_BASE).origin || u.pathname !== "/v1/responses") {
+      throw new AuthError("refusing_inference_destination")
+    }
+    req.signal.throwIfAborted()
+    // Keep the exact request bytes for at most one 401 replay.
+    const bodyText = req.body ? await req.text() : undefined
+    let sendBody = bodyText
+    if (bodyText) {
+      try { sendBody = JSON.stringify(normalizeRequest(JSON.parse(bodyText))) } catch { /* not JSON: forward as-is */ }
+    }
+
+    let a = await auth.fresh(getAuth)
+    const send = (current) => {
+      req.signal.throwIfAborted()
+      const headers = new Headers()
+      headers.set("Authorization", "Bearer " + current.access)
+      headers.set("User-Agent", BUILD_USER_AGENT)
+      headers.set("X-Client-Id", CLIENT_HEADER)
+      headers.set("Content-Type", "application/json")
+      headers.set("Accept", "text/event-stream")
+      return fetch(API_BASE + "/responses", {
+        method: "POST", headers,
+        body: sendBody,
+        signal: req.signal, redirect: "error",
+      })
+    }
+    let renewed = a.signIn === "renewed"
+    let res = await send(a)
+    if (res.status === 401) {
+      await res.body?.cancel()
+      a = await auth.fresh(getAuth, a.access)
+      renewed ||= a.signIn === "renewed"
+      res = await send(a)
+    }
+    const headers = new Headers(res.headers)
+    // The answer goes back as it came, streamed chunk by chunk; the
+    // host re-streams it, so the upstream wire encoding and size no
+    // longer apply.
+    headers.delete("content-encoding")
+    headers.delete("content-length")
+    if (res.ok) {
+      headers.set("X-Magpie-Sign-In", renewed ? "renewed" : "kept")
+    } else if (res.status === 401) {
+      // A 401 that survived a fresh mint is the sign-in itself: mark
+      // the account so Magpie stops sending to it until it is signed
+      // in again. Any other failure is left for the gateway to judge
+      // (a 401 about a model the account may not use reads as `kept`).
+      headers.set("X-Magpie-Sign-In", "expired")
+    }
+    return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
+  }
+
+  return {
+    config: async (config) => {
+      config.provider ??= {}
+      const p = config.provider[ID] ??= {}
+      p.name ??= "Muse (Meta)"
+      p.npm ??= NPM
+      p.api ??= API_BASE
+      // Meta runs the hosted web search tool itself (its Responses API
+      // takes {type: "web_search"}), so a client's web search reaches
+      // this fetch as it was sent instead of going through Magpie's own
+      // search.
+      p.searches ??= true
+      p.models = { ...configCatalog(), ...(p.models ?? {}) }
+    },
+    provider: {
+      id: ID,
+      async models(provider, { auth: saved }) {
+        // Static registry: Meta exposes no live catalog for this API.
+        // The bootstrap models from config() are returned as-is; the
+        // sign-in snapshot is only checked, never redeemed here.
+        if (saved?.type !== "oauth") return provider.models
+        return catalog()
+      },
+    },
+    auth: {
+      provider: ID, icon: "meta", refreshLead: 120000,
+      refresh: auth.refresh,
+      async loader(getAuth) {
+        if ((await auth.read(getAuth))?.type !== "oauth") return {}
+        return {
+          baseURL: API_BASE, apiKey: "muse-oauth",
+          fetch: (input, init) => signedFetch(getAuth, input, init),
+        }
+      },
+      async usage(getAuth) {
+        try {
+          const a = await auth.read(getAuth)
+          if (a?.type !== "oauth") return {}
+          const m = metadata(a)
+          return {
+            plan: m.tier || undefined,
+            user: m.name || m.email || undefined,
+          }
+        } catch { return {} }
+      },
+      methods: [{ type: "oauth", label: "Muse (Meta) — device code", authorize: auth.authorize }],
+    },
+  }
+}
