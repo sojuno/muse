@@ -253,8 +253,128 @@ export function normalizeRequest(body) {
   return out
 }
 
+// parseSubscriptionUsage validates and normalizes one `subscription`
+// object from Meta's `response.subscription_usage` event. The event is
+// the only place the allowance lives: `weekly` and `window` each carry
+// `used_percent` (0-100) and `resets_at` (Unix seconds); the window also
+// carries `window_duration_mins`. Returns null when nothing usable is
+// in it. Pure: takes the parsed object, returns a normalized entry.
+// (CLIProxyAPI knows the event too but strips it from the stream and
+// never reads it — its Meta executor only counts tokens per request and
+// reacts to a 429. There is no separate Meta usage endpoint to ask.)
+export function parseSubscriptionUsage(subscription) {
+  if (!subscription || typeof subscription !== "object" || Array.isArray(subscription)) return null
+  const readWindow = (w) => {
+    if (!w || typeof w !== "object" || Array.isArray(w)) return null
+    const used = typeof w.used_percent === "number" && isFinite(w.used_percent) ? Math.max(0, w.used_percent) : null
+    const resetsAt = typeof w.resets_at === "number" && isFinite(w.resets_at) && w.resets_at > 0
+      ? new Date(w.resets_at * 1000).toISOString() : null
+    const spanSecs = typeof w.window_duration_mins === "number" && isFinite(w.window_duration_mins) && w.window_duration_mins > 0
+      ? w.window_duration_mins * 60 : null
+    if (used === null && resetsAt === null) return null
+    return { used, resetsAt, spanSecs }
+  }
+  const weekly = readWindow(subscription.weekly)
+  const window = readWindow(subscription.window)
+  if (!weekly && !window) return null
+  return {
+    tier: typeof subscription.tier === "string" && subscription.tier ? subscription.tier : null,
+    weekly, window,
+  }
+}
+
+// subscriptionWindows turns a cached subscription entry (from
+// parseSubscriptionUsage) into the windows Magpie's `usage` hook returns:
+// the 5-hour window and the weekly window, each with its used percent
+// and reset time. Magpie's host turns `used` into the card's meter and
+// routing reads the allowance from it; a window with no reading would
+// show as "No allowance reported", so only windows with a reading are
+// returned.
+export function subscriptionWindows(cached) {
+  if (!cached || typeof cached !== "object") return []
+  const out = []
+  if (cached.window) {
+    const w = { name: "5-hour window", used: cached.window.used ?? null }
+    if (cached.window.resetsAt) w.resetsAt = cached.window.resetsAt
+    if (cached.window.spanSecs) w.span = cached.window.spanSecs
+    out.push(w)
+  }
+  if (cached.weekly) {
+    const w = { name: "Weekly", used: cached.weekly.used ?? null }
+    if (cached.weekly.resetsAt) w.resetsAt = cached.weekly.resetsAt
+    out.push(w)
+  }
+  return out
+}
+
+// subscriptionUsageStream returns a TransformStream that watches an SSE
+// response body for Meta's `response.subscription_usage` event and records
+// the latest subscription payload for the account (in `store`, keyed by
+// `email`). Every chunk passes through unchanged — the plugin only
+// observes, never filters — so the client still sees the event. Only
+// `data:` lines mentioning "subscription" are parsed, and scanning stops
+// after the first event (Meta sends one per response, first). A line may
+// split across chunks, so lines are buffered until complete.
+export function subscriptionUsageStream(store, email) {
+  const decoder = new TextDecoder()
+  let buf = ""
+  let done = false
+  const scanLine = (line) => {
+    if (done || !line.startsWith("data:")) return
+    const payload = line.slice(5)
+    if (!payload.includes("subscription")) return
+    let parsed
+    try { parsed = JSON.parse(payload.trim()) } catch { return }
+    if (!parsed || typeof parsed !== "object" || !parsed.subscription || typeof parsed.subscription !== "object") return
+    const entry = parseSubscriptionUsage(parsed.subscription)
+    if (entry && store && typeof email === "string" && email !== "") {
+      store.set(email, entry)
+      done = true
+    }
+  }
+  return new TransformStream({
+    transform(chunk, controller) {
+      controller.enqueue(chunk)
+      if (done) return
+      let text
+      try { text = decoder.decode(chunk, { stream: true }) } catch { return }
+      buf += text
+      let idx
+      while ((idx = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, idx).trim()
+        buf = buf.slice(idx + 1)
+        scanLine(line)
+        if (done) break
+      }
+    },
+    flush() {
+      if (done) return
+      let tail = ""
+      try { tail = decoder.decode() } catch { tail = "" }
+      const line = (buf + tail).trim()
+      if (line) scanLine(line)
+    },
+  })
+}
+
+// subscriptionAccountKey is the cache key for one sign-in: its email,
+// falling back to its display name. Returns null when neither is known,
+// in which case usage is not recorded for that account.
+function subscriptionAccountKey(signIn) {
+  try {
+    const m = metadata(signIn)
+    if (typeof m.email === "string" && m.email) return m.email
+    if (typeof m.name === "string" && m.name) return m.name
+  } catch {}
+  return null
+}
+
 export async function MuseAuthPlugin({ client }) {
   const auth = createAuth(client)
+  // Latest subscription usage per account, from the `response.subscription_usage`
+  // events Meta sends in its response streams. The `usage` hook reads it;
+  // a restart clears it until the account's next request.
+  const subscriptionUsage = new Map()
 
   async function signedFetch(getAuth, input, init) {
     const req = new Request(input, init)
@@ -371,7 +491,16 @@ export async function MuseAuthPlugin({ client }) {
       // (a 401 about a model the account may not use reads as `kept`).
       headers.set("X-Magpie-Sign-In", "expired")
     }
-    return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
+    // Watch the answer's stream for the subscription_usage event: it is
+    // the only place Meta tells the allowance, and the `usage` hook
+    // reads what was last seen. The stream itself passes through
+    // untouched.
+    let body = res.body
+    if (res.ok && body) {
+      const key = subscriptionAccountKey(a)
+      if (key) body = body.pipeThrough(subscriptionUsageStream(subscriptionUsage, key))
+    }
+    return new Response(body, { status: res.status, statusText: res.statusText, headers })
   }
 
   return {
@@ -413,9 +542,14 @@ export async function MuseAuthPlugin({ client }) {
           const a = await auth.read(getAuth)
           if (a?.type !== "oauth") return {}
           const m = metadata(a)
+          // The allowance comes from the last subscription_usage event
+          // this account's stream carried; until its first request
+          // there is no reading, and the card says so.
+          const windows = subscriptionWindows(subscriptionUsage.get(subscriptionAccountKey(a)))
           return {
             plan: m.tier || undefined,
             user: m.name || m.email || undefined,
+            ...(windows.length ? { windows } : {}),
           }
         } catch { return {} }
       },

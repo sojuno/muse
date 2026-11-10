@@ -3,7 +3,7 @@
 // passes back untouched. Network is fully mocked. Run: node --test test/
 import test from "node:test"
 import assert from "node:assert/strict"
-import { MuseAuthPlugin, normalizeRequest, stripReasoningEncryptedContent, parseReferencedReasoningId, dropBareReasoningItems, dropAllReasoningItems } from "../index.mjs"
+import { MuseAuthPlugin, normalizeRequest, stripReasoningEncryptedContent, parseReferencedReasoningId, dropBareReasoningItems, dropAllReasoningItems, parseSubscriptionUsage, subscriptionWindows, subscriptionUsageStream } from "../index.mjs"
 
 test("normalizeRequest: adds missing instructions, drops refused fields", () => {
   const out = normalizeRequest({
@@ -799,4 +799,109 @@ test("signedFetch: caller error, then expired item heals in two resends", async 
   } finally {
     globalThis.fetch = realFetch
   }
+})
+
+test("parseSubscriptionUsage: reads weekly and window percents and resets", () => {
+  const out = parseSubscriptionUsage({
+    tier: "1234567890123456",
+    weekly: { resets_at: 1792368000, used_percent: 80 },
+    window: { resets_at: 1792272519, used_percent: 10, window_duration_mins: 300 },
+  })
+  assert.equal(out.tier, "1234567890123456")
+  assert.equal(out.weekly.used, 80)
+  assert.equal(out.weekly.resetsAt, new Date(1792368000 * 1000).toISOString())
+  assert.equal(out.window.used, 10)
+  assert.equal(out.window.resetsAt, new Date(1792272519 * 1000).toISOString())
+  assert.equal(out.window.spanSecs, 18000)
+  assert.equal(parseSubscriptionUsage({}), null)
+  assert.equal(parseSubscriptionUsage(null), null)
+  assert.equal(parseSubscriptionUsage({ weekly: { used_percent: "80" } }), null)
+  // A window with only a reset time still counts as a reading.
+  assert.deepEqual(parseSubscriptionUsage({ window: { resets_at: 1792272519 } }).window, { used: null, resetsAt: new Date(1792272519 * 1000).toISOString(), spanSecs: null })
+})
+
+test("subscriptionWindows: two windows, weekly only, or none", () => {
+  const full = subscriptionWindows(parseSubscriptionUsage({
+    tier: "t",
+    weekly: { resets_at: 1792368000, used_percent: 80 },
+    window: { resets_at: 1792272519, used_percent: 10, window_duration_mins: 300 },
+  }))
+  assert.equal(full.length, 2)
+  assert.equal(full[0].name, "5-hour window")
+  assert.equal(full[0].used, 10)
+  assert.equal(full[0].resetsAt, new Date(1792272519 * 1000).toISOString())
+  assert.equal(full[0].span, 18000)
+  assert.equal(full[1].name, "Weekly")
+  assert.equal(full[1].used, 80)
+  assert.equal(full[1].resetsAt, new Date(1792368000 * 1000).toISOString())
+  assert.equal(subscriptionWindows(parseSubscriptionUsage({ weekly: { resets_at: 1792368000, used_percent: 80 } })).length, 1)
+  assert.deepEqual(subscriptionWindows(null), [])
+  assert.deepEqual(subscriptionWindows({}), [])
+})
+
+test("subscriptionUsageStream: records the event, passes the stream through unchanged", async () => {
+  const store = new Map()
+  const sse = 'event: response.subscription_usage\n'
+    + 'data: {"subscription":{"tier":"1234567890123456","weekly":{"resets_at":1792368000,"used_percent":80},"window":{"resets_at":1792272519,"used_percent":10,"window_duration_mins":300}},"type":"response.subscription_usage"}\n\n'
+    + 'data: {"type":"response.completed","response":{"id":"resp_9","status":"completed","output":[]}}\n\n'
+  const res = new Response(new ReadableStream({
+    start(c) {
+      // Split mid-line, so the event's data line spans two chunks.
+      const mid = Math.floor(sse.length / 2)
+      c.enqueue(new TextEncoder().encode(sse.slice(0, mid)))
+      c.enqueue(new TextEncoder().encode(sse.slice(mid)))
+      c.close()
+    },
+  }), { status: 200, headers: { "Content-Type": "text/event-stream" } })
+  const out = await new Response(res.body.pipeThrough(subscriptionUsageStream(store, "a@b.c"))).text()
+  assert.equal(out, sse)
+  const entry = store.get("a@b.c")
+  assert.equal(entry.window.used, 10)
+  assert.equal(entry.weekly.used, 80)
+  assert.equal(entry.tier, "1234567890123456")
+})
+
+test("signedFetch: a streamed reply's subscription_usage reaches the usage hook", async () => {
+  const hooks = await MuseAuthPlugin({ client: stubClient })
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async () => {
+    const sse = 'event: response.subscription_usage\n'
+      + 'data: {"subscription":{"tier":"1234567890123456","weekly":{"resets_at":1792368000,"used_percent":80},"window":{"resets_at":1792272519,"used_percent":10,"window_duration_mins":300}},"type":"response.subscription_usage"}\n\n'
+      + 'data: {"type":"response.completed","response":{"id":"resp_9","status":"completed","output":[],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+    return new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } })
+  }
+  try {
+    const loader = await hooks.auth.loader(async () => fakeSignIn())
+    const res = await loader.fetch("https://api.meta.ai/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "muse-spark-1.3", input: "hi", stream: true }),
+    })
+    assert.equal(res.status, 200)
+    // The client still sees the event: the plugin only observes.
+    const text = await res.text()
+    assert.match(text, /response\.subscription_usage/)
+    assert.match(text, /response\.completed/)
+    const u = await hooks.auth.usage(async () => fakeSignIn())
+    assert.equal(u.plan, "Pro")
+    assert.equal(u.user, "A B")
+    assert.equal(u.windows.length, 2)
+    assert.equal(u.windows[0].name, "5-hour window")
+    assert.equal(u.windows[0].used, 10)
+    assert.equal(u.windows[0].resetsAt, new Date(1792272519 * 1000).toISOString())
+    assert.equal(u.windows[0].span, 18000)
+    assert.equal(u.windows[1].name, "Weekly")
+    assert.equal(u.windows[1].used, 80)
+    assert.equal(u.windows[1].resetsAt, new Date(1792368000 * 1000).toISOString())
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test("signedFetch: usage hook reports no windows before any request", async () => {
+  const hooks = await MuseAuthPlugin({ client: stubClient })
+  const u = await hooks.auth.usage(async () => fakeSignIn())
+  assert.equal(u.plan, "Pro")
+  assert.equal(u.user, "A B")
+  assert.equal("windows" in u, false)
 })
