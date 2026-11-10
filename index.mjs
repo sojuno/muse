@@ -166,6 +166,36 @@ export function stripReasoningEncryptedContent(body) {
   return changed ? { ...body, input } : body
 }
 
+// dropBareReasoningItems removes every reasoning item that has nothing
+// sealed in it (no encrypted_content) — unless the request asks the vendor
+// to store the turn (store: true), in which case the vendor kept the items
+// and a bare id resolves. A bare item is only a server-side reference: its
+// summary is the model's notes to itself, which no model reads back, and
+// when the vendor has nothing stored for the id the whole request goes
+// back 400 "Referenced reasoning item 'rs_…' was not found or has
+// expired". An old session collects one such item per turn, so dropping
+// one per retry can never heal it — all of them go, up front, in one
+// request. Sealed items (with encrypted_content) are kept: the 0.1.6
+// retry still heals a blob sealed for another caller, and the 0.1.7 loop
+// still drops a single item Meta names. Mirrors Magpie's own
+// withoutBareReasoning (Codex backend, #1008), which the plugin path
+// never went through.
+export function dropBareReasoningItems(body) {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return body
+  if (!Array.isArray(body.input)) return body
+  if (body.store === true) return body
+  let changed = false
+  const input = body.input.filter((item) => {
+    if (item !== null && typeof item === "object" && !Array.isArray(item) && item.type === "reasoning" &&
+        (typeof item.encrypted_content !== "string" || item.encrypted_content.trim() === "")) {
+      changed = true
+      return false
+    }
+    return true
+  })
+  return changed ? { ...body, input } : body
+}
+
 // parseReferencedReasoningId pulls the reasoning item id(s) out of Meta's
 // "Referenced reasoning item '...' was not found or has expired." refusal.
 // The quoted id can hold two tokens joined by ':' (rs_…:rs_…) and there is
@@ -233,11 +263,14 @@ export async function MuseAuthPlugin({ client }) {
       throw new AuthError("refusing_inference_destination")
     }
     req.signal.throwIfAborted()
-    // Keep the exact request bytes for at most one 401 replay.
+    // Keep the exact request bytes for at most one 401 replay, with bare
+    // reasoning already out: reasoning items with nothing sealed in them
+    // are server-side references the vendor may no longer have, and one
+    // dead reference 400s the whole turn.
     const bodyText = req.body ? await req.text() : undefined
     let sendBody = bodyText
     if (bodyText) {
-      try { sendBody = JSON.stringify(normalizeRequest(JSON.parse(bodyText))) } catch { /* not JSON: forward as-is */ }
+      try { sendBody = JSON.stringify(dropBareReasoningItems(normalizeRequest(JSON.parse(bodyText)))) } catch { /* not JSON: forward as-is */ }
     }
 
     let a = await auth.fresh(getAuth)

@@ -3,7 +3,7 @@
 // passes back untouched. Network is fully mocked. Run: node --test test/
 import test from "node:test"
 import assert from "node:assert/strict"
-import { MuseAuthPlugin, normalizeRequest, stripReasoningEncryptedContent, parseReferencedReasoningId, dropReasoningItemById } from "../index.mjs"
+import { MuseAuthPlugin, normalizeRequest, stripReasoningEncryptedContent, parseReferencedReasoningId, dropReasoningItemById, dropBareReasoningItems } from "../index.mjs"
 
 test("normalizeRequest: adds missing instructions, drops refused fields", () => {
   const out = normalizeRequest({
@@ -383,6 +383,8 @@ test("signedFetch: 400 expired reasoning item drops it and retries once", async 
           { type: "reasoning", id: "rs_live", summary: [{ type: "summary_text", text: "kept" }] },
           { type: "message", role: "user", content: "continue" },
         ],
+        // store: true keeps the bare items past the 0.1.8 preemptive drop, so this test exercises the retry loop.
+        store: true,
         stream: false,
       }),
     })
@@ -421,6 +423,8 @@ test("signedFetch: compound id falls back to the second token", async () => {
           { type: "reasoning", id: "rs_second", summary: [{ type: "summary_text", text: "old" }] },
           { type: "message", role: "user", content: "continue" },
         ],
+        // store: true keeps the bare items past the 0.1.8 preemptive drop, so this test exercises the retry loop.
+        store: true,
         stream: false,
       }),
     })
@@ -460,6 +464,8 @@ test("signedFetch: expired item then sealed blob heals in two resends", async ()
           { type: "reasoning", id: "rs_sealed", summary: [{ type: "summary_text", text: "kept" }], encrypted_content: "blob-from-another-account" },
           { type: "message", role: "user", content: "continue" },
         ],
+        // store: true keeps the bare items past the 0.1.8 preemptive drop, so this test exercises the retry loop.
+        store: true,
         stream: false,
       }),
     })
@@ -504,6 +510,8 @@ test("signedFetch: sealed blob then expired item heals in the other order", asyn
           { type: "reasoning", id: "rs_sealed", summary: [{ type: "summary_text", text: "kept" }], encrypted_content: "blob-from-another-account" },
           { type: "message", role: "user", content: "continue" },
         ],
+        // store: true keeps the bare items past the 0.1.8 preemptive drop, so this test exercises the retry loop.
+        store: true,
         stream: false,
       }),
     })
@@ -541,6 +549,101 @@ test("signedFetch: expired item with no matching input is returned, no retry", a
     assert.equal(n, 1)
     const out = await res.json()
     assert.match(out.error.message, /rs_ghost/)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test("dropBareReasoningItems: drops every bare item, keeps sealed ones", () => {
+  const out = dropBareReasoningItems({
+    model: "muse-spark-1.3", store: false,
+    input: [
+      { type: "reasoning", id: "rs_dead1", summary: [{ type: "summary_text", text: "old" }] },
+      { type: "reasoning", id: "rs_dead2", summary: [] },
+      { type: "reasoning", id: "rs_sealed", summary: [{ type: "summary_text", text: "kept" }], encrypted_content: "blob" },
+      { type: "reasoning", id: "rs_empty_blob", summary: [], encrypted_content: "   " },
+      { type: "message", role: "user", content: "hi" },
+      { type: "function_call", id: "fc_1", call_id: "c1", name: "read", arguments: "{}" },
+    ],
+  })
+  assert.equal(out.input.length, 3)
+  assert.equal(out.input[0].id, "rs_sealed")
+  assert.equal(out.input[1].role, "user")
+  assert.equal(out.input[2].id, "fc_1")
+})
+
+test("dropBareReasoningItems: no-op without bare items, and keeps them when store is true", () => {
+  const sealed = { model: "m", input: [{ type: "reasoning", id: "rs_1", encrypted_content: "blob" }] }
+  assert.equal(dropBareReasoningItems(sealed), sealed)
+  const stored = { model: "m", store: true, input: [{ type: "reasoning", id: "rs_1", summary: [] }] }
+  assert.equal(dropBareReasoningItems(stored), stored)
+  assert.equal(dropBareReasoningItems({ model: "m", input: "just a string" }).input, "just a string")
+  assert.equal(dropBareReasoningItems(null), null)
+})
+
+test("signedFetch: several bare reasoning items are all dropped before the first send", async () => {
+  const hooks = await MuseAuthPlugin({ client: stubClient })
+  const realFetch = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url, init) => {
+    seen.push(JSON.parse(init.body))
+    return new Response(JSON.stringify({ id: "r", status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] }), { status: 200, headers: { "Content-Type": "application/json" } })
+  }
+  try {
+    const loader = await hooks.auth.loader(async () => fakeSignIn())
+    const res = await loader.fetch("https://api.meta.ai/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "muse-spark-1.3",
+        input: [
+          { type: "reasoning", id: "rs_dead1", summary: [{ type: "summary_text", text: "old" }] },
+          { type: "reasoning", id: "rs_dead2", summary: [] },
+          { type: "reasoning", id: "rs_dead3", summary: [{ type: "summary_text", text: "older" }] },
+          { type: "reasoning", id: "rs_sealed", summary: [{ type: "summary_text", text: "kept" }], encrypted_content: "blob-from-this-account" },
+          { type: "message", role: "user", content: "continue" },
+        ],
+        stream: false,
+      }),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(seen.length, 1) // no 400, no retry: the dead items never went out
+    assert.equal(seen[0].input.length, 2)
+    assert.equal(seen[0].input[0].id, "rs_sealed")
+    assert.equal(seen[0].input[1].role, "user")
+    const out = await res.json()
+    assert.equal(out.output[0].content[0].text, "ok")
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test("signedFetch: store true keeps bare reasoning items in the sent body", async () => {
+  const hooks = await MuseAuthPlugin({ client: stubClient })
+  const realFetch = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url, init) => {
+    seen.push(JSON.parse(init.body))
+    return new Response(JSON.stringify({ id: "r", status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] }), { status: 200, headers: { "Content-Type": "application/json" } })
+  }
+  try {
+    const loader = await hooks.auth.loader(async () => fakeSignIn())
+    const res = await loader.fetch("https://api.meta.ai/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "muse-spark-1.3", store: true,
+        input: [
+          { type: "reasoning", id: "rs_kept", summary: [{ type: "summary_text", text: "stored" }] },
+          { type: "message", role: "user", content: "continue" },
+        ],
+        stream: false,
+      }),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].input.length, 2)
+    assert.equal(seen[0].input[0].id, "rs_kept")
   } finally {
     globalThis.fetch = realFetch
   }
