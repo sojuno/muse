@@ -3,7 +3,7 @@
 // passes back untouched. Network is fully mocked. Run: node --test test/
 import test from "node:test"
 import assert from "node:assert/strict"
-import { MuseAuthPlugin, normalizeRequest, stripReasoningEncryptedContent, parseReferencedReasoningId, dropReasoningItemById, dropBareReasoningItems, dropAllReasoningItems } from "../index.mjs"
+import { MuseAuthPlugin, normalizeRequest, stripReasoningEncryptedContent, parseReferencedReasoningId, dropBareReasoningItems, dropAllReasoningItems } from "../index.mjs"
 
 test("normalizeRequest: adds missing instructions, drops refused fields", () => {
   const out = normalizeRequest({
@@ -341,25 +341,7 @@ test("parseReferencedReasoningId: both tokens of a compound id, null otherwise",
   assert.equal(parseReferencedReasoningId(undefined), null)
 })
 
-test("dropReasoningItemById: drops only the named item, no-op when absent", () => {
-  const body = {
-    model: "muse-spark-1.3",
-    input: [
-      { type: "reasoning", id: "rs_dead", summary: [{ type: "summary_text", text: "old" }] },
-      { type: "reasoning", id: "rs_live", summary: [{ type: "summary_text", text: "kept" }] },
-      { type: "message", role: "user", content: "hi" },
-    ],
-  }
-  const out = dropReasoningItemById(body, "rs_dead")
-  assert.equal(out.input.length, 2)
-  assert.equal(out.input[0].id, "rs_live")
-  assert.equal(out.input[1].role, "user")
-  assert.equal(dropReasoningItemById(body, "rs_missing"), body)
-  assert.equal(dropReasoningItemById({ model: "m", input: "just a string" }, "rs_dead").input, "just a string")
-  assert.equal(dropReasoningItemById(null, "rs_dead"), null)
-})
-
-test("signedFetch: 400 expired reasoning item drops it and retries once", async () => {
+test("signedFetch: 400 expired reasoning item drops ALL reasoning and retries once", async () => {
   const hooks = await MuseAuthPlugin({ client: stubClient })
   const realFetch = globalThis.fetch
   const seen = []
@@ -390,9 +372,11 @@ test("signedFetch: 400 expired reasoning item drops it and retries once", async 
     })
     assert.equal(res.status, 200)
     assert.equal(seen.length, 2)
-    assert.equal(seen[1].input.length, 2)
-    assert.equal(seen[1].input[0].id, "rs_live")
-    assert.equal(seen[1].input[1].role, "user")
+    // The first refusal drops ALL reasoning at once — rs_live goes too:
+    // every item in the history belongs to the old account/store, so
+    // dropping only the named one would just surface the next dead id.
+    assert.equal(seen[1].input.length, 1)
+    assert.equal(seen[1].input[0].role, "user")
     const out = await res.json()
     assert.equal(out.output[0].content[0].text, "ok")
   } finally {
@@ -400,7 +384,7 @@ test("signedFetch: 400 expired reasoning item drops it and retries once", async 
   }
 })
 
-test("signedFetch: compound id falls back to the second token", async () => {
+test("signedFetch: compound expired-item id drops all reasoning at once", async () => {
   const hooks = await MuseAuthPlugin({ client: stubClient })
   const realFetch = globalThis.fetch
   const seen = []
@@ -437,7 +421,7 @@ test("signedFetch: compound id falls back to the second token", async () => {
   }
 })
 
-test("signedFetch: expired item then sealed blob heals in two resends", async () => {
+test("signedFetch: caller error then expired item heals in two resends", async () => {
   const hooks = await MuseAuthPlugin({ client: stubClient })
   const realFetch = globalThis.fetch
   const seen = []
@@ -445,10 +429,10 @@ test("signedFetch: expired item then sealed blob heals in two resends", async ()
     seen.push(JSON.parse(init.body))
     const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } })
     if (seen.length === 1) {
-      return json({ error: { message: "Referenced reasoning item 'rs_dead' was not found or has expired.", type: "invalid_request_error" } }, 400)
+      return json({ error: { message: "reasoning `encrypted_content` was not issued to this caller", type: "invalid_request_error" } }, 400)
     }
     if (seen.length === 2) {
-      return json({ error: { message: "reasoning `encrypted_content` was not issued to this caller", type: "invalid_request_error" } }, 400)
+      return json({ error: { message: "Referenced reasoning item 'rs_dead' was not found or has expired.", type: "invalid_request_error" } }, 400)
     }
     return json({ id: "r", status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] })
   }
@@ -471,11 +455,12 @@ test("signedFetch: expired item then sealed blob heals in two resends", async ()
     })
     assert.equal(res.status, 200)
     assert.equal(seen.length, 3)
-    assert.equal(seen[1].input.length, 2) // dead item dropped
-    assert.equal(seen[1].input[0].id, "rs_sealed")
-    assert.equal(seen[2].input.length, 2)
-    assert.equal("encrypted_content" in seen[2].input[0], false) // blob stripped
-    assert.equal(seen[2].input[0].id, "rs_sealed")
+    assert.equal(seen[1].input.length, 3)
+    assert.equal("encrypted_content" in seen[1].input[1], false) // blob stripped first
+    assert.equal(seen[1].input[0].id, "rs_dead")
+    // The expired-item refusal then drops ALL reasoning at once.
+    assert.equal(seen[2].input.length, 1)
+    assert.equal(seen[2].input[0].role, "user")
     const out = await res.json()
     assert.equal(out.output[0].content[0].text, "ok")
   } finally {
@@ -519,8 +504,8 @@ test("signedFetch: sealed blob then expired item heals in the other order", asyn
     assert.equal(seen.length, 3)
     assert.equal("encrypted_content" in seen[1].input[1], false) // blob stripped first
     assert.equal(seen[1].input[0].id, "rs_dead")
-    assert.equal(seen[2].input.length, 2) // dead item dropped second
-    assert.equal(seen[2].input[0].id, "rs_sealed")
+    assert.equal(seen[2].input.length, 1) // expired item drops ALL reasoning second
+    assert.equal(seen[2].input[0].role, "user")
   } finally {
     globalThis.fetch = realFetch
   }
@@ -667,20 +652,18 @@ test("dropAllReasoningItems: removes every reasoning item, keeps the rest", () =
   assert.equal(dropAllReasoningItems(null), null)
 })
 
-test("signedFetch: a second expired-item refusal drops ALL reasoning at once", async () => {
+test("signedFetch: first expired-item refusal drops ALL reasoning at once", async () => {
   const hooks = await MuseAuthPlugin({ client: stubClient })
   const realFetch = globalThis.fetch
   const seen = []
   globalThis.fetch = async (url, init) => {
     seen.push(JSON.parse(init.body))
     const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } })
-    // The id Meta names changes from attempt to attempt: the first
-    // refusal names rs_dead1, the next names rs_dead2.
+    // The id Meta names changes from attempt to attempt, so dropping
+    // only the named item can never heal it — all reasoning goes on
+    // the first refusal, and the turn proceeds in two sends.
     if (seen.length === 1) {
       return json({ error: { message: "Referenced reasoning item 'rs_dead1' was not found or has expired.", type: "invalid_request_error", code: "invalid_request_error" } }, 400)
-    }
-    if (seen.length === 2) {
-      return json({ error: { message: "Referenced reasoning item 'rs_dead2' was not found or has expired.", type: "invalid_request_error", code: "invalid_request_error" } }, 400)
     }
     return json({ id: "r", status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] })
   }
@@ -701,11 +684,9 @@ test("signedFetch: a second expired-item refusal drops ALL reasoning at once", a
       }),
     })
     assert.equal(res.status, 200)
-    assert.equal(seen.length, 3)
-    // Send 2 dropped only the named item; send 3 dropped all reasoning.
-    assert.equal(seen[1].input.length, 3)
-    assert.equal(seen[2].input.length, 1)
-    assert.equal(seen[2].input[0].role, "user")
+    assert.equal(seen.length, 2)
+    assert.equal(seen[1].input.length, 1)
+    assert.equal(seen[1].input[0].role, "user")
   } finally {
     globalThis.fetch = realFetch
   }
@@ -779,7 +760,7 @@ test("signedFetch: expired-item with no reasoning left drops previous_response_i
   }
 })
 
-test("signedFetch: caller error, then expired item, then a second expired item heals in three resends", async () => {
+test("signedFetch: caller error, then expired item heals in two resends", async () => {
   const hooks = await MuseAuthPlugin({ client: stubClient })
   const realFetch = globalThis.fetch
   const seen = []
@@ -791,9 +772,6 @@ test("signedFetch: caller error, then expired item, then a second expired item h
     }
     if (seen.length === 2) {
       return json({ error: { message: "Referenced reasoning item 'rs_a' was not found or has expired.", type: "invalid_request_error", code: "invalid_request_error" } }, 400)
-    }
-    if (seen.length === 3) {
-      return json({ error: { message: "Referenced reasoning item 'rs_b' was not found or has expired.", type: "invalid_request_error", code: "invalid_request_error" } }, 400)
     }
     return json({ id: "r", status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] })
   }
@@ -813,12 +791,11 @@ test("signedFetch: caller error, then expired item, then a second expired item h
       }),
     })
     assert.equal(res.status, 200)
-    assert.equal(seen.length, 4)
-    // Send 2 stripped the blobs; send 3 dropped only rs_a; send 4 dropped all reasoning.
+    assert.equal(seen.length, 3)
+    // Send 2 stripped the blobs; send 3 dropped ALL reasoning at once.
     assert.equal(seen[1].input.filter((i) => i.type === "reasoning").every((i) => !("encrypted_content" in i)), true)
-    assert.equal(seen[2].input.length, 2)
-    assert.equal(seen[3].input.length, 1)
-    assert.equal(seen[3].input[0].role, "user")
+    assert.equal(seen[2].input.length, 1)
+    assert.equal(seen[2].input[0].role, "user")
   } finally {
     globalThis.fetch = realFetch
   }

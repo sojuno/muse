@@ -176,10 +176,10 @@ export function stripReasoningEncryptedContent(body) {
 // expired". An old session collects one such item per turn, so dropping
 // one per retry can never heal it — all of them go, up front, in one
 // request. Sealed items (with encrypted_content) are kept: the 0.1.6
-// retry still heals a blob sealed for another caller, and the 0.1.7 loop
-// still drops a single item Meta names. Mirrors Magpie's own
-// withoutBareReasoning (Codex backend, #1008), which the plugin path
-// never went through.
+// retry still heals a blob sealed for another caller, and the retry loop
+// below drops all reasoning the moment Meta names a dead item. Mirrors
+// Magpie's own withoutBareReasoning (Codex backend, #1008), which the
+// plugin path never went through.
 export function dropBareReasoningItems(body) {
   if (body === null || typeof body !== "object" || Array.isArray(body)) return body
   if (!Array.isArray(body.input)) return body
@@ -220,35 +220,16 @@ export function dropAllReasoningItems(body) {
 
 // parseReferencedReasoningId pulls the reasoning item id(s) out of Meta's
 // "Referenced reasoning item '...' was not found or has expired." refusal.
-// The quoted id can hold two tokens joined by ':' (rs_…:rs_…) and there is
-// no evidence which token is the input item's id, so both are returned:
-// the caller tries the first, then the second. Returns null when the text
-// is not that refusal.
+// The quoted id can hold two tokens joined by ':' (rs_…:rs_…). The ids
+// themselves are not acted on — the caller only needs to know the error
+// is this refusal — but they are returned for the message. Returns null
+// when the text is not that refusal.
 export function parseReferencedReasoningId(errorText) {
   if (typeof errorText !== "string") return null
   const m = /Referenced reasoning item '([^']+)' was not found or has expired/i.exec(errorText)
   if (!m) return null
   const ids = m[1].split(":").map((s) => s.trim()).filter(Boolean)
   return ids.length ? ids : null
-}
-
-// dropReasoningItemById returns a request body without the input item of
-// this id (any type; in practice only reasoning items carry rs_… ids).
-// Returns the body unchanged when no item carries the id, so the caller
-// can tell nothing was dropped and must not resend.
-export function dropReasoningItemById(body, id) {
-  if (body === null || typeof body !== "object" || Array.isArray(body)) return body
-  if (!Array.isArray(body.input)) return body
-  if (typeof id !== "string" || id === "") return body
-  let changed = false
-  const input = body.input.filter((item) => {
-    if (item !== null && typeof item === "object" && !Array.isArray(item) && item.id === id) {
-      changed = true
-      return false
-    }
-    return true
-  })
-  return changed ? { ...body, input } : body
 }
 
 // isEncryptedContentCallerError is Meta's 400 when a Responses request
@@ -321,53 +302,35 @@ export async function MuseAuthPlugin({ client }) {
     // The 400s Meta answers about replayed reasoning, healed in order:
     // a blob sealed for another caller (strip it), a reasoning item it
     // can no longer resolve ("Referenced reasoning item 'rs_…' was not
-    // found or has expired" — a reference that lapsed after a resume gap,
-    // or another account's), and — when the reference lives in the
+    // found or has expired"), and — when the reference lives in the
     // previous response the request points at instead of in `input` —
-    // the `previous_response_id` itself. Either can surface after the
-    // other is fixed. The named drop heals one dead item; an old session
-    // collects one per turn, and the id Meta names changes from attempt
-    // to attempt, so a second expired-item refusal drops ALL reasoning
-    // items at once instead of chasing them one by one. At most three
+    // the `previous_response_id` itself. The expired-item refusal only
+    // shows up when the account switched mid-conversation (or the
+    // vendor's store expired), and then EVERY reasoning item in the
+    // history belongs to the old account/store — chasing them one by
+    // one just names the next dead id, as three consecutive retries of
+    // one session proved (a different id each time). So the first
+    // expired-item refusal drops ALL reasoning items at once, no
+    // named drop, no second chance for a single item. At most three
     // resends (four sends total); a rejection no fix applies to is
     // rebuilt below so nothing is lost.
     let resends = 0
-    let healedExpired = false
     let healedSealed = false
     let droppedAllReasoning = false
     let droppedPrevResponse = false
     while (res.status === 400 && resends < 3) {
       const errorText = await res.text().catch(() => "")
       let nextBody
-      if (!healedExpired && sendBody) {
-        const ids = parseReferencedReasoningId(errorText)
-        if (ids) {
-          let parsed
-          try { parsed = JSON.parse(sendBody) } catch { parsed = undefined }
-          if (parsed) {
-            for (const id of ids) {
-              const dropped = dropReasoningItemById(parsed, id)
-              if (dropped !== parsed) { nextBody = JSON.stringify(dropped); break }
-            }
-          }
-          if (nextBody !== undefined) healedExpired = true
-        }
+      if (!droppedAllReasoning && sendBody && parseReferencedReasoningId(errorText)) {
+        let dropped
+        try { dropped = JSON.stringify(dropAllReasoningItems(JSON.parse(sendBody))) } catch { dropped = undefined }
+        if (dropped && dropped !== sendBody) { nextBody = dropped; droppedAllReasoning = true }
       }
       if (nextBody === undefined && !healedSealed && sendBody) {
         if (isEncryptedContentCallerError(res.status, errorText)) {
           let stripped
           try { stripped = JSON.stringify(stripReasoningEncryptedContent(JSON.parse(sendBody))) } catch { stripped = undefined }
           if (stripped && stripped !== sendBody) { nextBody = stripped; healedSealed = true }
-        }
-      }
-      if (nextBody === undefined && !droppedAllReasoning && sendBody) {
-        // A second expired-item refusal, or one naming an id that is not
-        // in `input` at all: the session holds more dead references than
-        // one named drop can chase, so all reasoning items go at once.
-        if (parseReferencedReasoningId(errorText)) {
-          let dropped
-          try { dropped = JSON.stringify(dropAllReasoningItems(JSON.parse(sendBody))) } catch { dropped = undefined }
-          if (dropped && dropped !== sendBody) { nextBody = dropped; droppedAllReasoning = true }
         }
       }
       if (nextBody === undefined && !droppedPrevResponse && sendBody) {
