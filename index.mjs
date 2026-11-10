@@ -137,6 +137,43 @@ function catalog() {
 // the strip costs nothing and covers anything else that reaches us.
 const DROP_FIELDS = ["generate", "prompt_cache_retention", "safety_identifier", "stream_options", "client_metadata"]
 
+// stripReasoningEncryptedContent drops `encrypted_content` from every
+// reasoning item in a Responses request body. Pure: takes the parsed body,
+// returns a new body. Meta binds each encrypted blob to the caller that
+// received it — replaying another account's blob fails with 400
+// "reasoning `encrypted_content` was not issued to this caller", which is
+// what happens when Magpie switches accounts mid-conversation (routing,
+// fallback, or the user switching the active account). The visible
+// `summary` and the item `id` are kept, so the model still sees what it
+// reasoned — only the opaque blob goes. Used only on the retry after
+// that 400, so same-account conversations keep the replay benefit.
+// (CLIProxyAPI's Meta executor has the same idea —
+// sanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign — but it
+// can only drop malformed blobs: Muse's own format is opaque to it, so
+// it keeps the blob and the account-switch case still hits Meta's 400.
+// The rejection itself is the only signal here.)
+export function stripReasoningEncryptedContent(body) {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return body
+  if (!Array.isArray(body.input)) return body
+  let changed = false
+  const input = body.input.map((item) => {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return item
+    if (item.type !== "reasoning" || !("encrypted_content" in item)) return item
+    changed = true
+    const { encrypted_content: _dropped, ...rest } = item
+    return rest
+  })
+  return changed ? { ...body, input } : body
+}
+
+// isEncryptedContentCallerError is Meta's 400 when a Responses request
+// replays a reasoning `encrypted_content` blob issued to another caller
+// (another account/key). The blob is opaque — only Meta knows who it was
+// issued to — so the rejection itself is the signal.
+function isEncryptedContentCallerError(status, text) {
+  return status === 400 && text.includes("encrypted_content") && text.includes("was not issued to this caller")
+}
+
 // normalizeRequest applies the two normalizations Meta needs on a
 // gateway-built Responses request. Pure: takes the parsed body, returns
 // the body to send. (1) Drop the fields above. (2) Ensure `instructions`
@@ -192,6 +229,24 @@ export async function MuseAuthPlugin({ client }) {
       a = await auth.fresh(getAuth, a.access)
       renewed ||= a.signIn === "renewed"
       res = await send(a)
+    }
+    if (res.status === 400) {
+      // A reasoning blob from another account: strip encrypted_content
+      // and send once more. The 400's body is consumed here; a rejection
+      // that is not this error is rebuilt below so nothing is lost.
+      const errorText = await res.text().catch(() => "")
+      if (isEncryptedContentCallerError(res.status, errorText) && sendBody) {
+        let stripped
+        try { stripped = JSON.stringify(stripReasoningEncryptedContent(JSON.parse(sendBody))) } catch { stripped = undefined }
+        if (stripped && stripped !== sendBody) {
+          sendBody = stripped
+          res = await send(a)
+        } else {
+          res = new Response(errorText, { status: res.status, statusText: res.statusText, headers: res.headers })
+        }
+      } else {
+        res = new Response(errorText, { status: res.status, statusText: res.statusText, headers: res.headers })
+      }
     }
     const headers = new Headers(res.headers)
     // The answer goes back as it came, streamed chunk by chunk; the

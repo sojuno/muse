@@ -3,7 +3,7 @@
 // passes back untouched. Network is fully mocked. Run: node --test test/
 import test from "node:test"
 import assert from "node:assert/strict"
-import { MuseAuthPlugin, normalizeRequest } from "../index.mjs"
+import { MuseAuthPlugin, normalizeRequest, stripReasoningEncryptedContent } from "../index.mjs"
 
 test("normalizeRequest: adds missing instructions, drops refused fields", () => {
   const out = normalizeRequest({
@@ -215,4 +215,113 @@ test("signedFetch: refuses foreign destinations", async () => {
     () => loader.fetch("https://api.meta.ai/v1/chat/completions", { method: "POST", body: "{}" }),
     /refusing_inference_destination/,
   )
+})
+
+test("stripReasoningEncryptedContent: drops the blob, keeps summary and id", () => {
+  const out = stripReasoningEncryptedContent({
+    model: "muse-spark-1.3",
+    input: [
+      { type: "message", role: "user", content: "hi" },
+      { type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: "thought" }], encrypted_content: "opaque-blob" },
+      { type: "reasoning", summary: [], encrypted_content: "another-blob" },
+    ],
+  })
+  assert.equal(out.model, "muse-spark-1.3")
+  assert.deepEqual(out.input[0], { type: "message", role: "user", content: "hi" })
+  assert.equal("encrypted_content" in out.input[1], false)
+  assert.equal(out.input[1].id, "rs_1")
+  assert.deepEqual(out.input[1].summary, [{ type: "summary_text", text: "thought" }])
+  assert.equal("encrypted_content" in out.input[2], false)
+})
+
+test("stripReasoningEncryptedContent: no-op without reasoning blobs", () => {
+  const body = { model: "muse-spark-1.3", input: [{ type: "message", role: "user", content: "hi" }] }
+  assert.equal(stripReasoningEncryptedContent(body), body)
+  assert.equal(stripReasoningEncryptedContent({ model: "m", input: "just a string" }).input, "just a string")
+  assert.equal(stripReasoningEncryptedContent(null), null)
+})
+
+test("signedFetch: 400 encrypted_content caller error strips the blob and retries once", async () => {
+  const hooks = await MuseAuthPlugin({ client: stubClient })
+  const realFetch = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url, init) => {
+    seen.push(JSON.parse(init.body))
+    const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } })
+    if (seen.length === 1) {
+      return json({ error: { message: "reasoning `encrypted_content` was not issued to this caller", type: "invalid_request_error", code: "invalid_request_error" } }, 400)
+    }
+    return json({ id: "r", status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] })
+  }
+  try {
+    const loader = await hooks.auth.loader(async () => fakeSignIn())
+    const res = await loader.fetch("https://api.meta.ai/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "muse-spark-1.3",
+        input: [
+          { type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: "thought" }], encrypted_content: "blob-from-another-account" },
+          { type: "message", role: "user", content: "continue" },
+        ],
+        stream: false,
+      }),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(seen.length, 2)
+    assert.equal(seen[0].input[0].encrypted_content, "blob-from-another-account")
+    assert.equal("encrypted_content" in seen[1].input[0], false)
+    assert.equal(seen[1].input[0].id, "rs_1")
+    assert.deepEqual(seen[1].input[0].summary, [{ type: "summary_text", text: "thought" }])
+    const out = await res.json()
+    assert.equal(out.output[0].content[0].text, "ok")
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test("signedFetch: other 400s are returned as-is, no retry", async () => {
+  const hooks = await MuseAuthPlugin({ client: stubClient })
+  const realFetch = globalThis.fetch
+  let n = 0
+  globalThis.fetch = async () => {
+    n++
+    return new Response(JSON.stringify({ error: { message: "model not found", type: "invalid_request_error", code: "model_not_found" } }), { status: 400, headers: { "Content-Type": "application/json" } })
+  }
+  try {
+    const loader = await hooks.auth.loader(async () => fakeSignIn())
+    const res = await loader.fetch("https://api.meta.ai/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "muse-spark-1.3", input: "hi", stream: false }),
+    })
+    assert.equal(res.status, 400)
+    assert.equal(n, 1)
+    const out = await res.json()
+    assert.equal(out.error.code, "model_not_found")
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test("signedFetch: 400 caller error with a non-JSON request body is returned as-is", async () => {
+  const hooks = await MuseAuthPlugin({ client: stubClient })
+  const realFetch = globalThis.fetch
+  let n = 0
+  globalThis.fetch = async () => {
+    n++
+    return new Response(JSON.stringify({ error: { message: "reasoning `encrypted_content` was not issued to this caller", type: "invalid_request_error" } }), { status: 400, headers: { "Content-Type": "application/json" } })
+  }
+  try {
+    const loader = await hooks.auth.loader(async () => fakeSignIn())
+    const res = await loader.fetch("https://api.meta.ai/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "not-json{{{",
+    })
+    assert.equal(res.status, 400)
+    assert.equal(n, 1)
+  } finally {
+    globalThis.fetch = realFetch
+  }
 })
