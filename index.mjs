@@ -166,6 +166,39 @@ export function stripReasoningEncryptedContent(body) {
   return changed ? { ...body, input } : body
 }
 
+// parseReferencedReasoningId pulls the reasoning item id(s) out of Meta's
+// "Referenced reasoning item '...' was not found or has expired." refusal.
+// The quoted id can hold two tokens joined by ':' (rs_…:rs_…) and there is
+// no evidence which token is the input item's id, so both are returned:
+// the caller tries the first, then the second. Returns null when the text
+// is not that refusal.
+export function parseReferencedReasoningId(errorText) {
+  if (typeof errorText !== "string") return null
+  const m = /Referenced reasoning item '([^']+)' was not found or has expired/i.exec(errorText)
+  if (!m) return null
+  const ids = m[1].split(":").map((s) => s.trim()).filter(Boolean)
+  return ids.length ? ids : null
+}
+
+// dropReasoningItemById returns a request body without the input item of
+// this id (any type; in practice only reasoning items carry rs_… ids).
+// Returns the body unchanged when no item carries the id, so the caller
+// can tell nothing was dropped and must not resend.
+export function dropReasoningItemById(body, id) {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return body
+  if (!Array.isArray(body.input)) return body
+  if (typeof id !== "string" || id === "") return body
+  let changed = false
+  const input = body.input.filter((item) => {
+    if (item !== null && typeof item === "object" && !Array.isArray(item) && item.id === id) {
+      changed = true
+      return false
+    }
+    return true
+  })
+  return changed ? { ...body, input } : body
+}
+
 // isEncryptedContentCallerError is Meta's 400 when a Responses request
 // replays a reasoning `encrypted_content` blob issued to another caller
 // (another account/key). The blob is opaque — only Meta knows who it was
@@ -230,23 +263,48 @@ export async function MuseAuthPlugin({ client }) {
       renewed ||= a.signIn === "renewed"
       res = await send(a)
     }
-    if (res.status === 400) {
-      // A reasoning blob from another account: strip encrypted_content
-      // and send once more. The 400's body is consumed here; a rejection
-      // that is not this error is rebuilt below so nothing is lost.
+    // Two 400s Meta answers about replayed reasoning, each healed once:
+    // a reasoning item it can no longer resolve ("Referenced reasoning
+    // item 'rs_…' was not found or has expired" — a reference that lapsed
+    // after a resume gap, or another account's), and a blob sealed for
+    // another caller. Either can surface after the other is fixed, so
+    // the loop runs at most two resends (three sends total, Magpie's own
+    // limit) and retries each class once. A 400's body is consumed here;
+    // a rejection no fix applies to is rebuilt below so nothing is lost.
+    let resends = 0
+    let healedExpired = false
+    let healedSealed = false
+    while (res.status === 400 && resends < 2) {
       const errorText = await res.text().catch(() => "")
-      if (isEncryptedContentCallerError(res.status, errorText) && sendBody) {
-        let stripped
-        try { stripped = JSON.stringify(stripReasoningEncryptedContent(JSON.parse(sendBody))) } catch { stripped = undefined }
-        if (stripped && stripped !== sendBody) {
-          sendBody = stripped
-          res = await send(a)
-        } else {
-          res = new Response(errorText, { status: res.status, statusText: res.statusText, headers: res.headers })
+      let nextBody
+      if (!healedExpired && sendBody) {
+        const ids = parseReferencedReasoningId(errorText)
+        if (ids) {
+          let parsed
+          try { parsed = JSON.parse(sendBody) } catch { parsed = undefined }
+          if (parsed) {
+            for (const id of ids) {
+              const dropped = dropReasoningItemById(parsed, id)
+              if (dropped !== parsed) { nextBody = JSON.stringify(dropped); break }
+            }
+          }
+          if (nextBody !== undefined) healedExpired = true
         }
-      } else {
-        res = new Response(errorText, { status: res.status, statusText: res.statusText, headers: res.headers })
       }
+      if (nextBody === undefined && !healedSealed && sendBody) {
+        if (isEncryptedContentCallerError(res.status, errorText)) {
+          let stripped
+          try { stripped = JSON.stringify(stripReasoningEncryptedContent(JSON.parse(sendBody))) } catch { stripped = undefined }
+          if (stripped && stripped !== sendBody) { nextBody = stripped; healedSealed = true }
+        }
+      }
+      if (nextBody === undefined) {
+        res = new Response(errorText, { status: res.status, statusText: res.statusText, headers: res.headers })
+        break
+      }
+      sendBody = nextBody
+      resends++
+      res = await send(a)
     }
     const headers = new Headers(res.headers)
     // The answer goes back as it came, streamed chunk by chunk; the
