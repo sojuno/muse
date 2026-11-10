@@ -30,8 +30,29 @@ export const MINT_URL = "https://api.meta.ai/muse-code/key"
 export const API_BASE = "https://api.meta.ai/v1"
 export const CLIENT_ID = "1031625952748946"
 export const USER_AGENT = "muse-code/1.0.2"
-export const BUILD_USER_AGENT = "muse-build/1.3.0 (interactive; macos-aarch64; build ac7280f2aca67769d1455a8847bb502b617d50f6)"
-export const CLIENT_HEADER = "tbh:tui"
+// The build User-Agent the real CLI sends, captured from Muse Code
+// 1.4.14-R7309.1 (build dec7d7497fecdad135ec5835a8161dbc92e55b58) on
+// linux-x86_64 — the same values CLIProxyAPI v8.0.63 sends. The version
+// and the build hash must move together: a new version with the old
+// build's hash would be an inconsistent fingerprint. The platform is
+// the host's own (CPA builds it from runtime.GOOS/GOARCH the same way);
+// gateway requests are non-interactive, unlike the CLI's own terminal.
+const META_CLIENT_VERSION = "1.4.14"
+const META_CLIENT_BUILD = "dec7d7497fecdad135ec5835a8161dbc92e55b58"
+function buildUserAgent() {
+  const p = typeof process !== "undefined" ? process : {}
+  let os = String(p.platform ?? "")
+  if (os === "darwin") os = "macos"
+  if (os === "win32") os = "windows"
+  let arch = String(p.arch ?? "")
+  if (arch === "x64" || arch === "amd64") arch = "x86_64"
+  if (arch === "arm64") arch = "aarch64"
+  if (!os) os = "linux"
+  if (!arch) arch = "x86_64"
+  return `muse-build/${META_CLIENT_VERSION} (non-interactive; ${os}-${arch}; build ${META_CLIENT_BUILD})`
+}
+export const BUILD_USER_AGENT = buildUserAgent()
+export const CLIENT_HEADER = "tbh:exec"
 export const GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 export const LEAD = 120000
 export const MAX_POLL = 15 * 60 * 1000
