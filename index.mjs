@@ -256,7 +256,22 @@ export async function MuseAuthPlugin({ client }) {
           }
         } catch { return {} }
       },
-      methods: [{ type: "oauth", label: "Muse (Meta) — device code", authorize: auth.authorize }],
+      methods: [
+        { type: "oauth", label: "Muse (Meta) — device code", authorize: auth.authorize },
+        {
+          type: "oauth", label: "Import CLIProxyAPI auth file", authorize: auth.authorizeImport,
+          // One prompt, typed unseen (type "password"): the whole
+          // CLIProxyAPI Meta auth file, or just its dca_token. Magpie
+          // asks it before the sign-in starts and validate() checks the
+          // paste parses before anything is minted.
+          prompts: [{
+            key: "auth", type: "password",
+            message: "Paste the CLIProxyAPI Meta auth file (JSON), or just its dca_token",
+            placeholder: "dca:… or the whole auth JSON",
+            validate: auth.validateImport,
+          }],
+        },
+      ],
     },
   }
 }

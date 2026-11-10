@@ -14,9 +14,16 @@ const stubClient = {
 test("plugin shape: config gives provider muse (Responses) with simple models", async () => {
   const hooks = await MuseAuthPlugin({ client: stubClient })
   assert.equal(hooks.auth.provider, "muse")
-  assert.equal(hooks.auth.methods.length, 1)
+  assert.equal(hooks.auth.methods.length, 2)
   assert.equal(hooks.auth.methods[0].type, "oauth")
   assert.equal(typeof hooks.auth.methods[0].authorize, "function")
+  assert.equal(hooks.auth.methods[1].type, "oauth")
+  assert.equal(hooks.auth.methods[1].label, "Import CLIProxyAPI auth file")
+  assert.equal(hooks.auth.methods[1].prompts.length, 1)
+  assert.equal(hooks.auth.methods[1].prompts[0].key, "auth")
+  assert.equal(hooks.auth.methods[1].prompts[0].type, "password")
+  assert.equal(typeof hooks.auth.methods[1].prompts[0].validate, "function")
+  assert.equal(typeof hooks.auth.methods[1].authorize, "function")
   assert.equal(typeof hooks.auth.loader, "function")
   assert.equal(typeof hooks.auth.refresh, "function")
   const cfg = { provider: {} }

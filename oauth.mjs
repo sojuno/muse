@@ -2,12 +2,22 @@
 // the Nous Portal plugin's auth module. The host owns persistence; this
 // module never reads Meta's (or any other app's) credential files.
 //
-// Flow, as CLIProxyAPI's Go implementation proves it works:
+// Two ways in, one stored shape (access = minted API key, refresh = JSON
+// with the DCA token + account details, expires = DCA deadline or now +
+// 1h). (1) Device-code OAuth, as CLIProxyAPI's Go implementation proves
+// it works:
 //   1. POST auth.meta.com/oidc/device/authorization/ with Meta Muse CLI's
 //      client_id -> device_code + user_code + verification URI.
 //   2. Poll auth.meta.com/oidc/device/token/ (RFC 8628) until the user
 //      approves in the browser -> DCA token (dca:...).
 //   3. POST api.meta.ai/muse-code/key with the DCA token -> a real API key.
+// (2) Import: paste a CLIProxyAPI Meta auth file (its whole JSON) — or
+// just its dca_token — and the plugin mints a fresh key from that DCA
+// token to prove it still works. The file's account details fill in
+// whatever the mint response does not say. Minting does not rotate the
+// DCA token, so the file's owner (CLIProxyAPI) keeps working alongside
+// Magpie — unlike a Codex import, which spends the refresh token and
+// signs the source tool out.
 // The API key is the usable credential: it does not expire on the DCA
 // timer, so the stored `expires` is the DCA deadline (the point after
 // which a fresh key can no longer be minted and the user must sign in
@@ -176,20 +186,73 @@ function horizon(dcaExpiresAtMs, nowMs) {
 }
 
 // token builds the stored sign-in fields from a fresh DCA token + minted key.
-function token(dca, minted, dcaExpiresAtMs, old) {
+// `fallback` is account detail from somewhere else (an imported auth file):
+// it fills only what the mint response and any previous sign-in did not say.
+function token(dca, minted, dcaExpiresAtMs, old, fallback = {}) {
   const previous = old ? (() => { try { return metadata(old) } catch { return {} } })() : {}
   const expires = positive(dcaExpiresAtMs) ? dcaExpiresAtMs : Date.now() + FALLBACK_LIFETIME
   const m = {
     version: 1,
     token: dca,
     tokenType: "Bearer",
-    baseURL: minted.baseURL || previous.baseURL || API_BASE,
-    email: minted.email || previous.email || "",
-    name: minted.name || previous.name || "",
-    tier: minted.tier || previous.tier || "",
-    subsActive: minted.subsActive ?? previous.subsActive ?? false,
+    baseURL: minted.baseURL || previous.baseURL || text(fallback.baseURL) || API_BASE,
+    email: minted.email || previous.email || text(fallback.email) || "",
+    name: minted.name || previous.name || text(fallback.name) || "",
+    tier: minted.tier || previous.tier || text(fallback.tier) || "",
+    subsActive: minted.subsActive ?? previous.subsActive ?? fallback.subsActive ?? false,
   }
   return { access: minted.apiKey, refresh: JSON.stringify(m), expires }
+}
+
+// parseImport pulls exactly what the plugin needs out of a pasted
+// CLIProxyAPI Meta auth file — or a bare DCA token. Returns
+// { dca, meta } where meta is the file's account detail (email, name,
+// tier, subsActive, baseURL), each possibly "". It accepts two file
+// shapes: CLIProxyAPI's flat one (dca_token at the top, as MetaTokenStorage
+// keeps it) and Muse CLI's native nested one (providers.meta.access_token,
+// which IS the DCA token there — see convert-muse-auth.py). A bare minted
+// API key (LLM|…) is refused: without the DCA token there is nothing to
+// mint the next key from, so the account would die at the first refresh.
+export function parseImport(pasted) {
+  let raw = text(pasted)
+  if (!raw) throw new AuthError("nothing_pasted")
+  if (raw.startsWith('"') && raw.endsWith('"') && raw.length >= 2) raw = raw.slice(1, -1).trim()
+  if (!raw) throw new AuthError("nothing_pasted")
+  if (raw.startsWith("{")) {
+    let obj
+    try { obj = JSON.parse(raw) } catch { throw new AuthError("invalid_import_json") }
+    if (!object(obj)) throw new AuthError("invalid_import_json")
+    const meta = object(obj.providers) && object(obj.providers.meta) ? obj.providers.meta : {}
+    const dca = text(obj.dca_token) || text(meta.access_token)
+    if (!dca) throw new AuthError("no_dca_token_in_import")
+    return {
+      dca,
+      meta: {
+        email: text(obj.email) || text(meta.user_email),
+        name: text(obj.name) || text(meta.user_full_name),
+        tier: text(obj.subs_tier_name),
+        subsActive: obj.is_subs_active === true,
+        baseURL: text(obj.base_url) || text(meta.api_base_url),
+      },
+    }
+  }
+  if (!raw.startsWith("dca:")) throw new AuthError("not_a_dca_token")
+  return { dca: raw, meta: {} }
+}
+
+// importProblem is the prompt's validate: the one-line reason a pasted
+// import cannot be used yet, or null when it parses. Kept separate from
+// parseImport's codes so the sign-in sheet can say it plainly.
+const IMPORT_PROBLEMS = {
+  nothing_pasted: "Paste the CLIProxyAPI auth file (JSON), or just its dca_token.",
+  invalid_import_json: "That is not valid JSON — paste the whole auth file as it is.",
+  no_dca_token_in_import: "No dca_token in that file — it needs the DCA token, not just the API key.",
+  not_a_dca_token: "That looks like an API key (LLM|…), not a DCA token (dca:…). Paste the whole JSON file, or the dca_token from it.",
+}
+export function importProblem(value) {
+  try { parseImport(value); return null } catch (e) {
+    return e instanceof AuthError ? (IMPORT_PROBLEMS[e.code] ?? "Could not read that import.") : "Could not read that import."
+  }
 }
 
 export function createAuth(client, { now = Date.now, clock = () => performance.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), request = (...args) => fetch(...args) } = {}) {
@@ -364,10 +427,32 @@ export function createAuth(client, { now = Date.now, clock = () => performance.n
     }
   }
 
+  // authorizeImport is the second sign-in method: the user pastes a
+  // CLIProxyAPI Meta auth file (its whole JSON) or just its dca_token
+  // into the prompt, and this mints a fresh API key from that DCA token.
+  // The mint is the proof the DCA token still works; a dead one fails
+  // here with mint_failed before anything is saved. There is no URL to
+  // open, so method "auto" runs the callback straight away. The pasted
+  // text is parsed again here — validate() already checked it, but the
+  // callback runs later, so the check is not trusted across the gap.
+  async function authorizeImport(inputs) {
+    const parsed = parseImport(inputs?.auth)
+    return {
+      method: "auto",
+      instructions: "Importing the pasted sign-in: minting a fresh API key from its DCA token.",
+      async callback() {
+        const minted = await mint(parsed.dca, request)
+        const got = token(parsed.dca, minted, 0, undefined, parsed.meta)
+        assertUsable(got, now(), LEAD)
+        return { type: "success", ...got, ...(minted.email ? { accountId: minted.email } : {}) }
+      },
+    }
+  }
+
   function current(auth) {
     if (auth?.type !== "oauth") throw new AuthError("not_signed_in", true)
     assertUsable(auth, now())
     return auth
   }
-  return { authorize, refresh, fresh, current, read }
+  return { authorize, authorizeImport, validateImport: importProblem, refresh, fresh, current, read }
 }
