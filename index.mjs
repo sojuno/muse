@@ -20,6 +20,13 @@ import { ID, API_BASE, BUILD_USER_AGENT, CLIENT_HEADER, AuthError, createAuth, m
 
 const NPM = "@ai-sdk/openai"
 
+// The provider's picture, used by the auth hook and package.json's
+// magpie.icon. It must be an https URL (or a data:image URI): Magpie's
+// host only keeps those, and the bundled name "meta" matches no icon
+// Magpie ships, so the provider fell back to the default picture.
+// The file is the Meta AI mark (lobehub/icons) vendored into this repo.
+const ICON = "https://raw.githubusercontent.com/sonvivu/magpie-muse-auth/main/icon.svg"
+
 // Static model registry — Meta exposes no live catalog for this API, so
 // the list mirrors CLIProxyAPI's registry (models.json, "meta" block).
 // Context/output token counts are the registry's.
@@ -229,7 +236,7 @@ export async function MuseAuthPlugin({ client }) {
       },
     },
     auth: {
-      provider: ID, icon: "meta", refreshLead: 120000,
+      provider: ID, icon: ICON, refreshLead: 120000,
       refresh: auth.refresh,
       async loader(getAuth) {
         if ((await auth.read(getAuth))?.type !== "oauth") return {}

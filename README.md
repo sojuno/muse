@@ -62,5 +62,6 @@ All offline: the sign-in and request-path tests mock `fetch`.
 
 ## Changelog
 
+- **0.1.3** — Fix the missing provider icon: the auth hook declared `icon: "meta"`, which matches no bundled icon Magpie ships (only `metaai-color` exists), and the host only keeps https/data picture URLs, so the provider fell back to the default picture. The Meta AI mark is now vendored as `icon.svg` and wired into the auth hook and `package.json`'s `magpie.icon`.
 - **0.1.2** — Fix refresh after the stamped DCA deadline passes: a successful mint now moves the stored `expires` forward (the minted key is the usable credential; minting proves the DCA token still works), instead of keeping the stale deadline and failing every request with `unusable_sign_in`. Only a mint that actually fails with 401/403 ends the sign-in.
 - **0.1.1** — Rebuilt thin: the gateway translates to Responses, the plugin only signs + normalizes; dropped the hand-rolled `responses.mjs`.
