@@ -3,7 +3,7 @@
 // passes back untouched. Network is fully mocked. Run: node --test test/
 import test from "node:test"
 import assert from "node:assert/strict"
-import { MuseAuthPlugin, normalizeRequest, stripReasoningEncryptedContent, parseReferencedReasoningId, dropReasoningItemById, dropBareReasoningItems } from "../index.mjs"
+import { MuseAuthPlugin, normalizeRequest, stripReasoningEncryptedContent, parseReferencedReasoningId, dropReasoningItemById, dropBareReasoningItems, dropAllReasoningItems } from "../index.mjs"
 
 test("normalizeRequest: adds missing instructions, drops refused fields", () => {
   const out = normalizeRequest({
@@ -644,6 +644,181 @@ test("signedFetch: store true keeps bare reasoning items in the sent body", asyn
     assert.equal(seen.length, 1)
     assert.equal(seen[0].input.length, 2)
     assert.equal(seen[0].input[0].id, "rs_kept")
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test("dropAllReasoningItems: removes every reasoning item, keeps the rest", () => {
+  const out = dropAllReasoningItems({
+    model: "muse-spark-1.3",
+    input: [
+      { type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: "a" }], encrypted_content: "blob" },
+      { type: "reasoning", id: "rs_2", summary: [] },
+      { type: "message", role: "user", content: "hi" },
+      { type: "function_call", id: "fc_1", call_id: "c1", name: "read", arguments: "{}" },
+    ],
+  })
+  assert.equal(out.input.length, 2)
+  assert.equal(out.input[0].role, "user")
+  assert.equal(out.input[1].id, "fc_1")
+  const none = { model: "m", input: [{ type: "message", role: "user", content: "hi" }] }
+  assert.equal(dropAllReasoningItems(none), none)
+  assert.equal(dropAllReasoningItems(null), null)
+})
+
+test("signedFetch: a second expired-item refusal drops ALL reasoning at once", async () => {
+  const hooks = await MuseAuthPlugin({ client: stubClient })
+  const realFetch = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url, init) => {
+    seen.push(JSON.parse(init.body))
+    const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } })
+    // The id Meta names changes from attempt to attempt: the first
+    // refusal names rs_dead1, the next names rs_dead2.
+    if (seen.length === 1) {
+      return json({ error: { message: "Referenced reasoning item 'rs_dead1' was not found or has expired.", type: "invalid_request_error", code: "invalid_request_error" } }, 400)
+    }
+    if (seen.length === 2) {
+      return json({ error: { message: "Referenced reasoning item 'rs_dead2' was not found or has expired.", type: "invalid_request_error", code: "invalid_request_error" } }, 400)
+    }
+    return json({ id: "r", status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] })
+  }
+  try {
+    const loader = await hooks.auth.loader(async () => fakeSignIn())
+    const res = await loader.fetch("https://api.meta.ai/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "muse-spark-1.3", store: true,
+        input: [
+          { type: "reasoning", id: "rs_dead1", summary: [{ type: "summary_text", text: "old" }], encrypted_content: "blob1" },
+          { type: "reasoning", id: "rs_dead2", summary: [{ type: "summary_text", text: "older" }], encrypted_content: "blob2" },
+          { type: "reasoning", id: "rs_live", summary: [{ type: "summary_text", text: "kept" }], encrypted_content: "blob3" },
+          { type: "message", role: "user", content: "continue" },
+        ],
+        stream: false,
+      }),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(seen.length, 3)
+    // Send 2 dropped only the named item; send 3 dropped all reasoning.
+    assert.equal(seen[1].input.length, 3)
+    assert.equal(seen[2].input.length, 1)
+    assert.equal(seen[2].input[0].role, "user")
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test("signedFetch: expired-item id not in input drops all reasoning at once", async () => {
+  const hooks = await MuseAuthPlugin({ client: stubClient })
+  const realFetch = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url, init) => {
+    seen.push(JSON.parse(init.body))
+    const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } })
+    if (seen.length === 1) {
+      return json({ error: { message: "Referenced reasoning item 'rs_ghost:rs_other' was not found or has expired.", type: "invalid_request_error", code: "invalid_request_error" } }, 400)
+    }
+    return json({ id: "r", status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] })
+  }
+  try {
+    const loader = await hooks.auth.loader(async () => fakeSignIn())
+    const res = await loader.fetch("https://api.meta.ai/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "muse-spark-1.3", store: true,
+        input: [
+          { type: "reasoning", id: "rs_kept", summary: [{ type: "summary_text", text: "kept" }], encrypted_content: "blob" },
+          { type: "message", role: "user", content: "continue" },
+        ],
+        stream: false,
+      }),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(seen.length, 2)
+    assert.equal(seen[1].input.length, 1)
+    assert.equal(seen[1].input[0].role, "user")
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test("signedFetch: expired-item with no reasoning left drops previous_response_id", async () => {
+  const hooks = await MuseAuthPlugin({ client: stubClient })
+  const realFetch = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url, init) => {
+    seen.push(JSON.parse(init.body))
+    const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } })
+    if (seen.length === 1) {
+      return json({ error: { message: "Referenced reasoning item 'rs_old' was not found or has expired.", type: "invalid_request_error", code: "invalid_request_error" } }, 400)
+    }
+    return json({ id: "r", status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] })
+  }
+  try {
+    const loader = await hooks.auth.loader(async () => fakeSignIn())
+    const res = await loader.fetch("https://api.meta.ai/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "muse-spark-1.3", previous_response_id: "resp_prev",
+        input: [{ type: "message", role: "user", content: "continue" }],
+        stream: false,
+      }),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(seen.length, 2)
+    assert.equal(seen[0].previous_response_id, "resp_prev")
+    assert.equal("previous_response_id" in seen[1], false)
+    assert.equal(seen[1].input.length, 1)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test("signedFetch: caller error, then expired item, then a second expired item heals in three resends", async () => {
+  const hooks = await MuseAuthPlugin({ client: stubClient })
+  const realFetch = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url, init) => {
+    seen.push(JSON.parse(init.body))
+    const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } })
+    if (seen.length === 1) {
+      return json({ error: { message: "reasoning encrypted_content was not issued to this caller", type: "invalid_request_error", code: "invalid_request_error" } }, 400)
+    }
+    if (seen.length === 2) {
+      return json({ error: { message: "Referenced reasoning item 'rs_a' was not found or has expired.", type: "invalid_request_error", code: "invalid_request_error" } }, 400)
+    }
+    if (seen.length === 3) {
+      return json({ error: { message: "Referenced reasoning item 'rs_b' was not found or has expired.", type: "invalid_request_error", code: "invalid_request_error" } }, 400)
+    }
+    return json({ id: "r", status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] })
+  }
+  try {
+    const loader = await hooks.auth.loader(async () => fakeSignIn())
+    const res = await loader.fetch("https://api.meta.ai/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "muse-spark-1.3",
+        input: [
+          { type: "reasoning", id: "rs_a", summary: [{ type: "summary_text", text: "a" }], encrypted_content: "blob-a" },
+          { type: "reasoning", id: "rs_b", summary: [{ type: "summary_text", text: "b" }], encrypted_content: "blob-b" },
+          { type: "message", role: "user", content: "continue" },
+        ],
+        stream: false,
+      }),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(seen.length, 4)
+    // Send 2 stripped the blobs; send 3 dropped only rs_a; send 4 dropped all reasoning.
+    assert.equal(seen[1].input.filter((i) => i.type === "reasoning").every((i) => !("encrypted_content" in i)), true)
+    assert.equal(seen[2].input.length, 2)
+    assert.equal(seen[3].input.length, 1)
+    assert.equal(seen[3].input[0].role, "user")
   } finally {
     globalThis.fetch = realFetch
   }

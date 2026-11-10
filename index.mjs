@@ -196,6 +196,28 @@ export function dropBareReasoningItems(body) {
   return changed ? { ...body, input } : body
 }
 
+// dropAllReasoningItems removes every reasoning item from a Responses
+// request body. The summaries are the model's notes to itself, and the
+// text history (messages, tool calls and their results) stays, so the
+// turn can still proceed — it just cannot replay any prior reasoning.
+// Used only after Meta has already refused the request over a reasoning
+// reference it cannot resolve: one dead reference per turn collects in
+// an old session, and the id Meta names changes from attempt to attempt,
+// so chasing them one by one never heals it.
+export function dropAllReasoningItems(body) {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return body
+  if (!Array.isArray(body.input)) return body
+  let changed = false
+  const input = body.input.filter((item) => {
+    if (item !== null && typeof item === "object" && !Array.isArray(item) && item.type === "reasoning") {
+      changed = true
+      return false
+    }
+    return true
+  })
+  return changed ? { ...body, input } : body
+}
+
 // parseReferencedReasoningId pulls the reasoning item id(s) out of Meta's
 // "Referenced reasoning item '...' was not found or has expired." refusal.
 // The quoted id can hold two tokens joined by ':' (rs_…:rs_…) and there is
@@ -296,18 +318,25 @@ export async function MuseAuthPlugin({ client }) {
       renewed ||= a.signIn === "renewed"
       res = await send(a)
     }
-    // Two 400s Meta answers about replayed reasoning, each healed once:
-    // a reasoning item it can no longer resolve ("Referenced reasoning
-    // item 'rs_…' was not found or has expired" — a reference that lapsed
-    // after a resume gap, or another account's), and a blob sealed for
-    // another caller. Either can surface after the other is fixed, so
-    // the loop runs at most two resends (three sends total, Magpie's own
-    // limit) and retries each class once. A 400's body is consumed here;
-    // a rejection no fix applies to is rebuilt below so nothing is lost.
+    // The 400s Meta answers about replayed reasoning, healed in order:
+    // a blob sealed for another caller (strip it), a reasoning item it
+    // can no longer resolve ("Referenced reasoning item 'rs_…' was not
+    // found or has expired" — a reference that lapsed after a resume gap,
+    // or another account's), and — when the reference lives in the
+    // previous response the request points at instead of in `input` —
+    // the `previous_response_id` itself. Either can surface after the
+    // other is fixed. The named drop heals one dead item; an old session
+    // collects one per turn, and the id Meta names changes from attempt
+    // to attempt, so a second expired-item refusal drops ALL reasoning
+    // items at once instead of chasing them one by one. At most three
+    // resends (four sends total); a rejection no fix applies to is
+    // rebuilt below so nothing is lost.
     let resends = 0
     let healedExpired = false
     let healedSealed = false
-    while (res.status === 400 && resends < 2) {
+    let droppedAllReasoning = false
+    let droppedPrevResponse = false
+    while (res.status === 400 && resends < 3) {
       const errorText = await res.text().catch(() => "")
       let nextBody
       if (!healedExpired && sendBody) {
@@ -329,6 +358,31 @@ export async function MuseAuthPlugin({ client }) {
           let stripped
           try { stripped = JSON.stringify(stripReasoningEncryptedContent(JSON.parse(sendBody))) } catch { stripped = undefined }
           if (stripped && stripped !== sendBody) { nextBody = stripped; healedSealed = true }
+        }
+      }
+      if (nextBody === undefined && !droppedAllReasoning && sendBody) {
+        // A second expired-item refusal, or one naming an id that is not
+        // in `input` at all: the session holds more dead references than
+        // one named drop can chase, so all reasoning items go at once.
+        if (parseReferencedReasoningId(errorText)) {
+          let dropped
+          try { dropped = JSON.stringify(dropAllReasoningItems(JSON.parse(sendBody))) } catch { dropped = undefined }
+          if (dropped && dropped !== sendBody) { nextBody = dropped; droppedAllReasoning = true }
+        }
+      }
+      if (nextBody === undefined && !droppedPrevResponse && sendBody) {
+        // No reasoning left in `input` and Meta still names a dead item:
+        // the reference lives in the previous response this request
+        // points at. Dropping the pointer makes Meta read only `input`,
+        // which carries the full history.
+        if (parseReferencedReasoningId(errorText)) {
+          let parsed
+          try { parsed = JSON.parse(sendBody) } catch { parsed = undefined }
+          if (parsed && typeof parsed.previous_response_id === "string" && parsed.previous_response_id !== "") {
+            const { previous_response_id: _dropped, ...rest } = parsed
+            nextBody = JSON.stringify(rest)
+            droppedPrevResponse = true
+          }
         }
       }
       if (nextBody === undefined) {
