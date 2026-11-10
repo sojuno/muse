@@ -113,6 +113,41 @@ test("signedFetch: stream passes through untouched", async () => {
   }
 })
 
+test("signedFetch: past DCA deadline still mints and serves (no unusable_sign_in)", async () => {
+  const hooks = await MuseAuthPlugin({ client: stubClient })
+  const realFetch = globalThis.fetch
+  let minted = 0
+  globalThis.fetch = async (url, init) => {
+    const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } })
+    if (String(url).includes("/muse-code/key")) {
+      minted++
+      return json({ api_key: "key-fresh", base_url: "https://api.meta.ai/v1", user_email: "a@b.c", user_full_name: "A B", subs_tier_name: "Pro", is_subs_active: true })
+    }
+    return json({ id: "r", status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] })
+  }
+  try {
+    // A sign-in whose stamped DCA deadline passed an hour ago, while the
+    // DCA token itself still mints (Meta accepts it past the stamped
+    // deadline). Regression (seen live 09/11): renew() kept the stale
+    // deadline, so fresh() threw unusable_sign_in on every request even
+    // though a fresh key had just been minted.
+    const stale = fakeSignIn()
+    stale.expires = Date.now() - 3600_000
+    const loader = await hooks.auth.loader(async () => stale)
+    const res = await loader.fetch("https://api.meta.ai/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "muse-spark-1.3", input: "hi", stream: false }),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(minted, 1)
+    const out = await res.json()
+    assert.equal(out.output[0].content[0].text, "ok")
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
 test("signedFetch: 401 re-mints once and retries", async () => {
   const hooks = await MuseAuthPlugin({ client: stubClient })
   const realFetch = globalThis.fetch

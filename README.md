@@ -59,3 +59,8 @@ npm test
 ```
 
 All offline: the sign-in and request-path tests mock `fetch`.
+
+## Changelog
+
+- **0.1.2** — Fix refresh after the stamped DCA deadline passes: a successful mint now moves the stored `expires` forward (the minted key is the usable credential; minting proves the DCA token still works), instead of keeping the stale deadline and failing every request with `unusable_sign_in`. Only a mint that actually fails with 401/403 ends the sign-in.
+- **0.1.1** — Rebuilt thin: the gateway translates to Responses, the plugin only signs + normalizes; dropped the hand-rolled `responses.mjs`.

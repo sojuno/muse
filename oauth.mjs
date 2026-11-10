@@ -136,6 +136,24 @@ async function mint(dcaToken, request) {
   }
 }
 
+// horizon is the stored `expires` a successful mint earns. The minted API
+// key is the usable credential, and minting proves the DCA token still
+// works — even past the deadline Meta stamped on it at sign-in. The old
+// code kept that stamped deadline after every mint, so once it passed,
+// fresh() threw unusable_sign_in on every request although a fresh key
+// had just been minted (seen live 09/11: sign-in worked at 23:55, then
+// every request failed with unusable_sign_in until a fresh sign-in reset
+// the deadline). Keep Meta's deadline while it is still ahead; past it
+// (or within the refresh lead), the new key buys another FALLBACK_LIFETIME,
+// and minting repeats hourly for as long as the DCA token works. Only a
+// mint that actually fails with 401/403 ends the sign-in (mint_failed,
+// "Sign in again").
+function horizon(dcaExpiresAtMs, nowMs) {
+  return positive(dcaExpiresAtMs) && dcaExpiresAtMs > nowMs + LEAD
+    ? dcaExpiresAtMs
+    : nowMs + FALLBACK_LIFETIME
+}
+
 // token builds the stored sign-in fields from a fresh DCA token + minted key.
 function token(dca, minted, dcaExpiresAtMs, old) {
   const previous = old ? (() => { try { return metadata(old) } catch { return {} } })() : {}
@@ -194,7 +212,7 @@ export function createAuth(client, { now = Date.now, clock = () => performance.n
         if (e instanceof AuthError && e.signIn === "expired") throw e
         throw e
       }
-      const got = token(m.token, minted, s.fields.expires, s.fields)
+      const got = token(m.token, minted, horizon(s.fields.expires, started), s.fields)
       // Record the rotated pair BEFORE persistence. A failed write must
       // never make the old key usable again.
       s.fields = got
