@@ -1,1 +1,48 @@
-{"description":"Muse (Meta) provider for Magpie and OpenCode: device-code OAuth, API-key minting, and signed Requests to Meta's Responses API","exports":{".":"./opencode2.mjs"},"files":["index.mjs","opencode.mjs","opencode2.mjs","oauth.mjs","README.md","icon.svg"],"keywords":["opencode","opencode-plugin","magpie","muse","meta","oauth"],"license":"MIT","magpie":{"maxConcurrency":16,"icon":"https://raw.githubusercontent.com/sonvivu/magpie-muse-auth/main/icon.svg"},"main":"./opencode.mjs","name":"magpie-muse-auth","repository":{"type":"git","url":"https://github.com/sonvivu/magpie-muse-auth"},"scripts":{"test":"node --test test/request.test.mjs test/plugin-shape.test.mjs test/import.test.mjs"},"type":"module","version":"0.1.11"}
+{
+  "description": "Magpie provider backed by the official Muse CLI with client tools bridged over MCP",
+  "exports": {
+    ".": "./plugin.mjs"
+  },
+  "files": [
+    "plugin.mjs",
+    "src/",
+    "bin/",
+    "README.md",
+    "LICENSE",
+    "icon.svg",
+    "LEGACY-OAUTH.md"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "magpie",
+    "muse",
+    "meta"
+  ],
+  "license": "MIT",
+  "magpie": {
+    "maxConcurrency": 8,
+    "icon": "https://raw.githubusercontent.com/sojuno/muse/main/icon.svg"
+  },
+  "main": "./plugin.mjs",
+  "name": "magpie-muse-cli",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sojuno/muse"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "doctor": "node bin/muse-cli.mjs doctor"
+  },
+  "type": "module",
+  "version": "0.2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "magpie-muse-cli": "./bin/muse-cli.mjs"
+  },
+  "dependencies": {
+    "@muse-code/sdk": "1.4.15"
+  }
+}

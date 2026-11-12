@@ -1,75 +1,105 @@
-# magpie-muse-auth
+# Magpie Muse CLI
 
-Muse (Meta) provider plugin for [Magpie](https://github.com/yetone/magpie) and OpenCode, written in the shape of the Nous Portal plugin (`@magpie-community/opencode-nous-auth`).
+Use your **official Muse Code CLI** as a Magpie provider. Targets **Linux + Muse Code 1.4.15** with `@muse-code/sdk` pinned to the same version.
 
-Sign-in is Meta's device-code OAuth — the same flow CLIProxyAPI uses — then an API key is minted from the DCA token and every chat request goes to Meta's Responses API. The plugin is deliberately thin: Magpie's gateway already translates whatever the agent sent into the API the model speaks, and `npm: "@ai-sdk/openai"` makes that the OpenAI Responses API, so the request this plugin's `fetch` receives IS a Responses request. It only signs it, normalizes two fields Meta is strict about, and passes the answer back untouched. No hand-rolled protocol translation: the gateway's own translation handles messages, tools, images, reasoning summaries and structured output.
+```text
+Your agent → Magpie → this plugin → muse serve → Meta
+                                ↕ MCP
+                   tool_calls → your agent → tool results
+```
 
-## Install
+Muse owns authentication and upstream requests. This plugin never imports a DCA token, mints an API key, or calls Meta's API itself. Client tools are exposed to Muse through per-session MCP. Their names and arguments return to your agent as ordinary tool calls; your agent executes them with its own permissions and returns the results. Muse then continues the same turn.
+
+This replaces the package entry point of the earlier direct-OAuth plugin. Its source remains in this repository for history, documented in [LEGACY-OAUTH.md](LEGACY-OAUTH.md), but is not loaded or included in the CLI package.
+
+## Install in Magpie
+
+Install Muse Code from its official source, verify `muse --version` reports **1.4.15**, and sign in using `muse login` if you have not already. Existing CLI authentication is reused.
+
+From this branch:
 
 ```sh
-magpie plugin add <path-to-this-folder>
-# or, once published:
-magpie plugin add magpie-muse-auth
+git clone --branch feat/muse-cli-bridge https://github.com/sojuno/muse.git
+cd muse
+npm ci --ignore-scripts
+magpie plugin add "$PWD"
+magpie plugin login muse-cli
+magpie provider test muse-cli
 ```
 
-Then sign in from Magpie (`magpie plugin login muse`, the Plugins page, or `magpie accounts add`). Two ways in: **device code** — open the Meta URL it shows, confirm the device code in your browser, and the sign-in finishes automatically; or **import** — paste a CLIProxyAPI Meta auth file (its whole JSON) or just its `dca_token`, and the plugin mints a fresh API key from that DCA token to prove it still works. Minting does not rotate the DCA token, so CLIProxyAPI keeps working alongside Magpie. The minted API key and DCA token are stored by Magpie in `plugin-auth.json`; this plugin never writes credential files itself.
+The local Magpie login links the CLI installation; it does not perform Meta OAuth or prove that the Meta account has remaining quota. A real request checks the CLI's sign-in.
 
-Verify with one tiny request per API (runs in a sandbox with its own `HOME` so the real Magpie is never touched):
+Pick a model such as `muse-cli/muse-spark-1.3` or `muse-cli/muse-wonder-1.0` in Magpie. Disable the old `magpie-muse-auth` plugin if you no longer want the direct-OAuth provider. The provider ids are different, so installing this plugin does not silently change an agent's selected model.
+
+If Muse is outside Magpie's PATH, set its absolute path in the installed plugin's Options:
+
+```json
+{
+  "museBin": "/home/you/.local/bin/muse"
+}
+```
+
+Or use the CLI, naming the installed plugin as `magpie plugin` lists it:
 
 ```sh
-magpie provider test muse
-magpie quota   # the usage hook: plan + account
+magpie plugin options magpie-muse-cli '{"museBin":"/home/you/.local/bin/muse"}'
 ```
 
-## Models
+Folder installs can be named by their absolute folder path instead. Magpie restarts its plugin host when options change. After editing source files, turn the plugin off and on in Magpie.
 
-| Model | Context | Max output |
-|---|---|---|
-| `muse-wonder-1.0` | 1,007,997 | 128,000 |
-| `muse-wonder-full-1.0` | 1,007,997 | 128,000 |
-| `muse-spark-1.3` | 1,048,576 | 65,536 |
-| `muse-spark-1.2` | 1,048,576 | 65,536 |
-| `muse-spark-1.1` | 1,048,576 | 65,536 |
+## Working directory and tool permissions
 
-Every model except Spark 1.1 also ships as a `-contributor` variant. Reasoning effort is selectable per model through the `minimal` … `max` variants (the gateway then sends `reasoning: {effort, summary: "auto"}` on the Responses request); with nothing selected, Meta's default applies.
+Magpie passes the client's project through `X-Magpie-Work-Dir`. The plugin decodes and validates that directory. A remote agent's path must exist on the Magpie machine; otherwise configure `workspace` explicitly. It never substitutes Magpie's configuration directory for your project.
 
-## How it works
+The actual Muse session runs in a new, empty directory owned by the bridge, **not in your repository**. Muse is launched with `--preset empty --trust-workspace --disable-shell --disable-write --disable-request-user-input`; session MCP requires workspace trust, so only that empty directory is trusted. The session selects Muse's built-in `:ask-me` permission profile. Client MCP calls are admitted once; the agent still controls their actual execution and approval. No persistent approval rules are written.
 
-```
-device-code OAuth (auth.meta.com, client_id of Muse CLI)
-  -> DCA token (dca:...)
-  -> mint API key (api.meta.ai/muse-code/key)
-  -> Bearer api_key -> POST api.meta.ai/v1/responses
-```
+The real-CLI regression test inspects the primary model request and verifies it offers only the `mcp__magpie_client` tool namespace. The CLI may run its own internal reminder bookkeeping separately.
 
-- `oauth.mjs` — device flow, key minting, refresh (re-mint from the stored DCA token), sign-in persistence through the host.
-- `index.mjs` — the plugin hooks: `config`, `provider.models`, `auth.loader` (custom `fetch`), `auth.refresh`, `auth.usage`, `auth.methods`. The custom `fetch` only ever talks to `https://api.meta.ai/v1/responses` (any other destination is refused before a token is read), strips auth-ish headers, sets `Authorization: Bearer <minted key>` plus Meta's build user-agent and `X-Client-Id: tbh:tui`, normalizes the request (drops `client_metadata` and four other fields Meta refuses, ensures `instructions` exists), and retries once after a 401 with a freshly minted key. `searches: true` is set on the provider, so a client's web search reaches Meta's own hosted search instead of Magpie's.
+Do not point Muse's `endpoint_transport` back at the same Magpie provider: that creates a routing loop. Use the normal Meta CLI provider for live use. The bridge never edits your Muse settings or credentials. Turn logs live in a temporary data directory, removed when the bridge closes normally; a force-killed host can leave temporary files for OS cleanup.
 
-## Risks and limits — read before using
+## Configuration
 
-- **Terms of service.** This signs in with Meta Muse CLI's own OAuth client and calls Meta's Model API directly, outside the CLI. Meta's terms say a Muse Code subscription is for use with the Muse Code CLI. Using it can risk a 403 (`client_attestation_denied`) or an account action, the same risk CLIProxyAPI's Meta support carries. If that risk matters more than having a gateway-routable provider, use the `muse serve` path instead (`opencode-muse`, which keeps auth inside the official CLI).
-- **Contributor lane.** The `-contributor` models bill through Meta's Contributor lane (data may be used for training). Do not route them at code you do not want trained on.
-- **No live catalog.** Meta exposes no model list for this API; the models above are a static registry mirroring CLIProxyAPI's.
-- **If Meta 400s a request:** the first suspect is `store: false`, which the gateway always sends on Responses requests. The fix is one line in `index.mjs`'s `normalizeRequest`: `delete out.store`.
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `museBin` | `muse` / `MUSE_CLI_BIN` | CLI path; detects the installer's versioned binary |
+| `workspace` | From the request | Explicit client project directory when metadata is unavailable |
+| `maxSessions` | 32 | Maximum in-memory conversations |
+| `turnTimeoutMs` | 600000 | Maximum time for a Muse turn, including tool waits |
+| `toolTimeoutMs` | 300000 | Maximum wait for a client tool result |
+| `serveArgs` | `[]` | Additional official `muse serve` arguments; advanced use/testing |
+| `museEnv` | `{}` | Explicit child environment additions; keep secret values out of plugin options |
 
-## Tests
+`museArgs` is a prefix for test launchers, not needed for an installed CLI. Fixed sandbox/preset flags are supplied by the bridge; do not duplicate them in `serveArgs`.
+
+## Behavior and current limits
+
+- Supports Chat Completions streaming/non-streaming, reasoning text, usage counts, inline images, function tools, parallel tool results, cancellation and named reasoning effort.
+- Keeps the same Muse session across client tool steps and subsequent messages. Session identity includes conversation, subagent and project. Changed history, model, system instructions or tool definitions starts a new session seeded from the supplied history.
+- After a plugin/CLI restart, conversation history can seed a new session. A lost pending tool step is rejected explicitly; retry from the user turn. There is no cross-process restoration of a tool call waiting for its result.
+- Return all tool results from one response together, using their original ids and tool definitions. New turns are rejected while previous tools are pending.
+- `tool_choice: "none"` prevents bridge tool execution. Named choices expose only that tool. Required/named choices are also communicated to Muse in the prompt; this is not a native model-level tool-choice guarantee.
+- The CLI has its own system/runtime instructions. Client system/developer messages are included in the initial conversation seed, not installed as an exact replacement for the CLI's system prompt. This is not full behavioral parity with every Claude bridge feature.
+- Structured `response_format`, audio/prediction and remote image URLs are rejected rather than silently ignored. No arbitrary external image fetches occur.
+- One local CLI account per plugin. Subscription allowance cards and multiple isolated Muse accounts are not implemented. Zero per-token prices in the model metadata do not imply free plan quota.
+- Magpie is the supported host. OpenCode 2's native plugin interface is not implemented by this entry point.
+
+## Verify
 
 ```sh
 npm test
+
+# Real official CLI, echo provider; no login or plan quota needed:
+MUSE_CLI_BIN=/absolute/path/to/muse npm run doctor
+
+# Real Meta sign-in and inference; spends a small amount of plan quota:
+MUSE_CLI_BIN=/absolute/path/to/muse npm run doctor -- --live
+
+# Include the full official-CLI MCP regression against a local test backend:
+MUSE_TEST_BIN=/absolute/path/to/muse npm test
 ```
 
-All offline: the sign-in and request-path tests mock `fetch`.
+The default suite runs the inherited 48 legacy regression tests and the new CLI bridge tests. The official-CLI test is explicitly skipped when `MUSE_TEST_BIN` is unset. It uses a dummy credential in a separate temporary configuration and routes requests only to a loopback test backend. It does not test a real Meta account.
 
-## Changelog
+Validated in development: Node 24.22.1, Muse Code 1.4.15-R8339.1, Magpie 0.1.3903, Linux x64. Real CLI artifact size/SHA-256 and the Magpie release checksum were verified before execution. Live Meta subscription inference has not been validated in this environment.
 
-- **0.1.11** — Magpie now shows the Muse allowance. Meta sends it in every response stream as a `response.subscription_usage` event (`weekly` and 5-hour `window`, each with `used_percent` and `resets_at`) — CLIProxyAPI knows the event but strips it and never reads it, so there was no CPA check to copy; the event itself is the source. The plugin watches the stream (a TransformStream that only observes, every chunk passes through unchanged) and caches the latest reading per account; the `usage` hook returns it as two windows (5-hour + Weekly) with the used percent and reset time, so the account card shows a meter instead of "No allowance reported" and routing knows the allowance. Until an account's first request there is no reading (no separate usage endpoint exists). Cost stays 0: Meta publishes no per-token price for Muse and CPA carries none either — the subscription ($50/month Power) is the price, not a per-request cost.
-- **0.1.10** — The first expired-item refusal drops ALL reasoning items at once. The named drop (0.1.7/0.1.9) is gone: the refusal only shows up when the account switched mid-conversation (or the vendor's store expired), and then every reasoning item in the history belongs to the old account/store — chasing them one by one just names the next dead id, as three consecutive retries of one real session proved (a different id each time). The turn now heals in two sends. The strip-blob retry (0.1.6), the preemptive bare drop (0.1.8) and the `previous_response_id` fallback stay. Verified against CLIProxyAPI v8.0.32 and v8.0.63: neither handles this error at all (no retry on 400 for Meta, Muse blobs kept as-is), so switching to CPA would fail identically — but its sanitizer taught the mechanism worth trying next: strip the reference (`id`), keep the content (summary), instead of dropping the whole item.
-- **0.1.9** — When one dead reasoning reference is not the whole story, stop chasing them one by one. The evidence from a real stuck chat (10/11 evening): the id Meta names changes from attempt to attempt (`rs_6af2fb7e…`, then `rs_6af2ee41…`, then `rs_6af2fadae…` across three consecutive retries of the same session), so the 0.1.7 named drop heals the first item and the next refusal names another. Now a second expired-item refusal drops ALL reasoning items at once, and if Meta still names a dead item with no reasoning left in `input`, the request's `previous_response_id` is dropped too (the reference lives in the previous response, and `input` carries the full history). The retry budget grows to three resends to fit the chain (strip → named drop → drop all). The summaries are the model's notes to itself and the text history stays, so the turn can proceed.
-- **0.1.8** — Drop ALL bare reasoning items up front, instead of one per retry. An old session collects one dead reasoning reference per turn, and 0.1.7 only dropped the one Meta named per request — so with two or more dead items the chat stayed stuck on the second one forever (the client's history never changes). Now every reasoning item with nothing sealed in it (no `encrypted_content`) is removed before the first send, unless the request asks the vendor to store the turn (`store: true`, in which case the vendor kept the items and a bare id resolves). A bare item is only a server-side reference and its summary is notes the model never reads back, so dropping it loses nothing the turn needs — and any number of dead items heals in a single request with no 400 spent. Sealed items are kept, and the 0.1.6/0.1.7 retry loop stays as the safety net. Mirrors Magpie's own `withoutBareReasoning` (Codex backend, #1008).
-- **0.1.7** — Heal the 400 `Referenced reasoning item 'rs_…' was not found or has expired` that leaves an old chat stuck for good. A reasoning item replayed by bare reference (id only) lapses on Meta's side after a resume gap — and the client replays it on every turn, so every resend 400s. The plugin now reads the id out of the refusal, drops exactly that reasoning item from `input`, and resends in the same turn; the old chat heals on its next message instead of staying broken. The 400 branch is now a bounded loop (at most two resends, three sends total, Magpie's own limit) that heals each of the two reasoning 400s once, in either order — the expired-item drop and the 0.1.6 encrypted_content strip can chain both ways. The quoted id can hold two tokens joined by `:` and there is no evidence which one is the input item's id, so the first token is tried, then the second; if neither matches, the 400 is returned untouched. This mirrors Magpie's own `withoutUnreadable` (Codex backend, #3062), which the plugin path never went through.
-- **0.1.6** — Heal the 400 `reasoning encrypted_content was not issued to this caller` on account switches. Meta binds each encrypted reasoning blob to the caller that received it, so when Magpie switches accounts mid-conversation the new account's replay of the old account's blob is refused. The plugin now retries once with `encrypted_content` stripped from every reasoning item (the visible `summary` and item `id` are kept) when Meta answers exactly that 400; other 400s pass through untouched. Same-account conversations keep the replay benefit — the strip only happens after the rejection. (CLIProxyAPI's Meta executor has a sanitizer for malformed blobs, but Muse's own format is opaque to it, so it keeps the blob and the account-switch case still hits this 400 — the rejection itself is the only signal.)
-- **0.1.5** — Second sign-in method: import a CLIProxyAPI Meta auth file. Paste the whole JSON (or just its `dca_token`) into the prompt Magpie shows; the plugin mints a fresh API key from that DCA token to prove it still works, and the file's account details fill in whatever the mint response does not say. A bare API key (`LLM|…`) is refused — without the DCA token there is nothing to mint the next key from. Minting does not rotate the DCA token, so CLIProxyAPI keeps working alongside Magpie (unlike a Codex import, which spends the refresh token). Magpie itself has no import hook for plugin-owned providers (its file-upload import is built-in-only), so this prompt is the plugin-side equivalent.
-- **0.1.4** — Refresh the client fingerprint to Muse Code 1.4.14: the build User-Agent is now `muse-build/1.4.14 (non-interactive; <host platform>; build dec7d749...)`, the values CLIProxyAPI v8.0.63 captured from the real 1.4.14 CLI (version and build hash move together; the platform is the host's own, gateway requests are non-interactive), and `X-Client-Id` moves from `tbh:tui` to `tbh:exec` to match. The OAuth User-Agent stays `muse-code/1.0.2`, unchanged upstream.
-- **0.1.3** — Fix the missing provider icon: the auth hook declared `icon: "meta"`, which matches no bundled icon Magpie ships (only `metaai-color` exists), and the host only keeps https/data picture URLs, so the provider fell back to the default picture. The Meta AI mark is now vendored as `icon.svg` and wired into the auth hook and `package.json`'s `magpie.icon`.
-- **0.1.2** — Fix refresh after the stamped DCA deadline passes: a successful mint now moves the stored `expires` forward (the minted key is the usable credential; minting proves the DCA token still works), instead of keeping the stale deadline and failing every request with `unusable_sign_in`. Only a mint that actually fails with 401/403 ends the sign-in.
-- **0.1.1** — Rebuilt thin: the gateway translates to Responses, the plugin only signs + normalizes; dropped the hand-rolled `responses.mjs`.
+MIT. Original upstream copyright/license retained.
