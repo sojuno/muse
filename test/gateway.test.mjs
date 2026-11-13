@@ -73,4 +73,30 @@ test("actual Magpie/Bun gateway converts Chat, Responses and Anthropic tool loop
     const last = await post("/v1/messages", { model, messages, tools, max_tokens: 1000 }, "anthropic")
     assert.ok(last.content.some(p => p.text === "ANTHROPIC_TOOL_OK"), JSON.stringify(last))
   })
+  await t.test("contributor alias completes a client tool loop through Magpie", async () => {
+    const model = "muse-cli/muse-spark-1.3-contributor"
+    const messages = [{ role: "user", content: "CALL_TOOL" }], tools = [{ type: "function", function: { name, parameters: schema } }]
+    const first = await post("/v1/chat/completions", { model, messages, tools }, "contributor")
+    const call = first.choices[0].message.tool_calls[0]
+    messages.push(first.choices[0].message, { role: "tool", tool_call_id: call.id, content: "CONTRIBUTOR_TOOL_OK" })
+    const last = await post("/v1/chat/completions", { model, messages, tools }, "contributor")
+    assert.equal(last.choices[0].message.content, "CONTRIBUTOR_TOOL_OK")
+    assert.equal(last.model, model)
+  })
+  await t.test("Magpie usage ledger counts tokens/cache and prices each lane in USD", async () => {
+    const res = await fetch(base + "/v1/magpie/usage/requests?period=all&provider=muse-cli")
+    assert.equal(res.status, 200)
+    const page = await res.json()
+    const rows = page.rows.filter(r => r.provider === "muse-cli" && r.out > 0)
+    assert.equal(rows.length, 4, JSON.stringify(page))
+    for (const row of rows) {
+      assert.equal(row.in, 10)
+      assert.equal(row.out, 4)
+      assert.equal(row.cache_read, 2)
+      const contributor = row.model.endsWith("-contributor")
+      const expected = contributor ? (10 * 0.10 + 2 * 0.002 + 4 * 0.20) / 1e6 : (10 * 1.25 + 2 * 0.15 + 4 * 4.25) / 1e6
+      assert.ok(Math.abs(row.cost - expected) < 1e-12, JSON.stringify(row))
+    }
+    assert.ok(rows.some(r => r.model.endsWith("-contributor")))
+  })
 })

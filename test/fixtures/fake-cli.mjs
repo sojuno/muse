@@ -7,6 +7,7 @@ const sessions = new Map(), running = new Map()
 const send = msg => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n")
 const notify = (method, params) => send({ method, params })
 const log = entry => { if (process.env.FAKE_CLI_LOG) fs.appendFileSync(process.env.FAKE_CLI_LOG, JSON.stringify(entry) + "\n") }
+log({ method: "test/launch", params: { args: process.argv.slice(2) } })
 const rpc = async (url, method, params = {}) => {
   const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: randomUUID(), method, params }) })
   const body = await res.json()

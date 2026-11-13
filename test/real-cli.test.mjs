@@ -9,7 +9,8 @@ import { MuseBridge } from "../src/bridge.mjs"
 
 // This test uses the unmodified official Linux CLI, with a deterministic API on
 // loopback. No Meta login, real credential or subscription quota is involved.
-for (const stream of [false, true]) test(`official Muse 1.4.15: MCP tools cross client HTTP turns (stream=${stream})`, { skip: !process.env.MUSE_TEST_BIN, timeout: 30000 }, async t => {
+for (const [stream, contributorMode] of [[false, false], [true, false], [true, true]]) test(`official Muse 1.4.15: MCP tools cross client HTTP turns (stream=${stream}, contributor=${contributorMode})`, { skip: !process.env.MUSE_TEST_BIN, timeout: 30000 }, async t => {
+  const model = `muse-spark-1.3${contributorMode ? "-contributor" : ""}`
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "muse-real-cli-test-"))
   const museEnv = { XDG_CONFIG_HOME: path.join(directory, "config"), XDG_DATA_HOME: path.join(directory, "data"), XDG_CACHE_HOME: path.join(directory, "cache"), META_API_KEY: "test-only-local-backend" }
   const auth = spawnSync(process.env.MUSE_TEST_BIN, ["auth", "set", "--provider", "meta", "--api-key-stdin"], { input: "test-only-local-backend\n", env: { ...process.env, ...museEnv }, encoding: "utf8" })
@@ -37,7 +38,7 @@ for (const stream of [false, true]) test(`official Muse 1.4.15: MCP tools cross 
     res.writeHead(200, { "content-type": "text/event-stream" })
     let seq = 0
     const send = (type, data) => res.write(`data: ${JSON.stringify({ type, sequence_number: seq++, ...data })}\n\n`)
-    const response = { id: `resp_${primary.length}`, object: "response", created_at: 1, model: "muse-spark-1.3", status: "in_progress", output: [] }
+    const response = { id: `resp_${primary.length}`, object: "response", created_at: 1, model: body.model, status: "in_progress", output: [] }
     send("response.created", { response })
     for (const [i, item] of output.entries()) {
       send("response.output_item.added", { output_index: i, item })
@@ -47,7 +48,7 @@ for (const stream of [false, true]) test(`official Muse 1.4.15: MCP tools cross 
     res.end()
   })
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve))
-  const bridge = new MuseBridge({ workspace: directory, museBin: process.env.MUSE_TEST_BIN, museEnv,
+  const bridge = new MuseBridge({ workspace: directory, museBin: process.env.MUSE_TEST_BIN, museEnv, contributorMode,
     serveArgs: ["--model", "muse-spark-1.3", "-c", `endpoint_transport=${JSON.stringify({ base_url: `http://127.0.0.1:${server.address().port}/v1`, auth: "none" })}`],
     turnTimeoutMs: 15000,
   })
@@ -55,7 +56,7 @@ for (const stream of [false, true]) test(`official Muse 1.4.15: MCP tools cross 
   bridge.host.subscribe(n => { if (n.method === "approval/resolved") approvals.push(n.params) })
   const tools = ["fs/read.file", ...(stream ? ["mcp__filesystem__read_file"] : [])].map(name => ({ type: "function", function: { name, description: "Client file tool", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } }))
   const messages = [{ role: "user", content: "Use the client file tool to read example.txt." }]
-  const chat = () => bridge.fetch("http://muse-cli.invalid/v1/chat/completions", { method: "POST", headers: { "x-magpie-session": "real-cli" }, body: JSON.stringify({ model: "muse-spark-1.3", messages, tools, stream }) })
+  const chat = () => bridge.fetch("http://muse-cli.invalid/v1/chat/completions", { method: "POST", headers: { "x-magpie-session": "real-cli" }, body: JSON.stringify({ model, messages, tools, stream }) })
   const read = async res => {
     if (!stream || !res.ok) return res.json()
     const message = { role: "assistant", content: "" }, calls = []
@@ -93,6 +94,7 @@ for (const stream of [false, true]) test(`official Muse 1.4.15: MCP tools cross 
   assert.ok(outputs.some(o => JSON.stringify(o).includes("ONLY_THE_CLIENT_PRODUCES_THIS_RESULT")))
   assert.equal(bridge.sessions.size, 1)
   assert.ok(primary.length >= 2)
+  assert.ok(primary.every(p => p.model === model), "The actual CLI wire request must retain the selected model, including its contributor suffix")
   assert.ok(primary.every(p => p.tools.every(group => group.name === "mcp__magpie_client")), "Main agent must be offered client tools only")
   assert.ok(approvals.some(a => a.decision === "approved"))
   assert.equal(approvals.some(a => a.decision === "approvedForSession" || a.decision === "approvedPolicyAmendment"), false)

@@ -10,7 +10,8 @@
     "README.md",
     "LICENSE",
     "icon.svg",
-    "LEGACY-OAUTH.md"
+    "LEGACY-OAUTH.md",
+    "PRICING.md"
   ],
   "keywords": [
     "opencode",
@@ -35,7 +36,7 @@
     "doctor": "node bin/muse-cli.mjs doctor"
   },
   "type": "module",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "engines": {
     "node": ">=22"
   },

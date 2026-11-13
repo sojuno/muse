@@ -252,7 +252,7 @@ export class MuseBridge {
   }
   async models() {
     const r = await this.host.request("model/list")
-    return (r.models ?? []).map(m => ({ id: m.modelId, name: m.displayLabel ?? m.modelId, context: m.contextLimit ?? 1048576, output: m.outputLimit ?? 65536, efforts: m.variants ?? [] }))
+    return (r.models ?? []).map(m => ({ id: m.modelId, name: m.displayLabel ?? m.modelId, context: m.contextLimit ?? 1048576, output: m.outputLimit ?? 65536, efforts: m.variants ?? [], cost: m.cost }))
   }
   async fetch(input, init) {
     let request, body

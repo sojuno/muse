@@ -31,6 +31,8 @@ The local Magpie login links the CLI installation; it does not perform Meta OAut
 
 Pick a model such as `muse-cli/muse-spark-1.3` or `muse-cli/muse-wonder-1.0` in Magpie. Disable the old `magpie-muse-auth` plugin if you no longer want the direct-OAuth provider. The provider ids are different, so installing this plugin does not silently change an agent's selected model.
 
+Contributor variants are exposed as `muse-cli/muse-spark-1.3-contributor` and `muse-cli/muse-spark-1.2-contributor` when the corresponding base model is in the account's CLI catalog. The CLI catalog itself keeps the base names. The plugin preserves the suffix on the actual model selection and uses separate CLI processes with contributor mode explicitly `on` or `off`, so choosing a contributor model does not change ordinary conversations. Meta states contributor models may use submitted data to improve its products; the choice is explicit in the model picker.
+
 If Muse is outside Magpie's PATH, set its absolute path in the installed plugin's Options:
 
 ```json
@@ -71,6 +73,27 @@ Do not point Muse's `endpoint_transport` back at the same Magpie provider: that 
 
 `museArgs` is a prefix for test launchers, not needed for an installed CLI. Fixed sandbox/preset flags are supplied by the bridge; do not duplicate them in `serveArgs`.
 
+Do not set `--contributor-mode` in `serveArgs`: the plugin owns that flag based on the selected model id.
+
+## Token usage and USD estimates
+
+Magpie records the input, output, cache-read and reasoning token counts reported by the Muse CLI. A tool step can end before the complete Muse turn has its usage; the aggregate is reported when that turn finishes. Reasoning tokens are part of output and are not added to the USD estimate a second time.
+
+The provider is labeled **Muse CLI (API reference cost)**. USD figures are estimates using [Meta's public API prices](https://dev.meta.ai/products/meta-model-api/), checked **2026-11-13**; they are **not an additional charge to your Muse Code subscription**. See [PRICING.md](PRICING.md) for the rate table and limitations.
+
+Per-model overrides are optional, in USD per million tokens:
+
+```json
+{
+  "pricing": {
+    "muse-spark-1.3": { "input": 1.25, "cacheRead": 0.15, "output": 4.25 },
+    "muse-spark-1.3-contributor": { "input": 0.10, "cacheRead": 0.002, "output": 0.20 }
+  }
+}
+```
+
+Set `referencePricing: false` to disable the bundled public-price snapshot, or set `pricing[modelId]` to `null` to leave that model unpriced. A future USD price reported by the CLI takes precedence over the snapshot, and an explicit override takes precedence over both. Keep the snapshot current as Meta changes its pricing.
+
 ## Behavior and current limits
 
 - Supports Chat Completions streaming/non-streaming, reasoning text, usage counts, inline images, function tools, parallel tool results, cancellation and named reasoning effort.
@@ -82,7 +105,7 @@ Do not point Muse's `endpoint_transport` back at the same Magpie provider: that 
 - The CLI has its own system/runtime instructions. Client system/developer messages are included in the initial conversation seed, not installed as an exact replacement for the CLI's system prompt. This is not full behavioral parity with every Claude bridge feature.
 - Structured `response_format`, audio/prediction and remote image URLs are rejected rather than silently ignored. No arbitrary external image fetches occur.
 - MCP **tools** from a client, including tools backed by its own stdio MCP servers, cross the bridge. MCP resources, prompts, server installation and server OAuth are not provided by this plugin; those remain the client's responsibility.
-- One local CLI account per plugin. Subscription allowance cards and multiple isolated Muse accounts are not implemented. Zero per-token prices in the model metadata do not imply free plan quota.
+- One local CLI account per plugin. Subscription allowance cards and multiple isolated Muse accounts are not implemented. API reference cost does not describe remaining subscription quota.
 - Magpie is the supported host. OpenCode 2's native plugin interface is not implemented by this entry point.
 
 ## Verify
@@ -103,8 +126,8 @@ MUSE_TEST_BIN=/absolute/path/to/muse npm test
 MUSE_TEST_BIN=/absolute/path/to/muse MAGPIE_TEST_BIN=/absolute/path/to/magpie npm test
 ```
 
-The default suite runs the inherited 48 legacy regression tests and the CLI bridge tests. The two official-CLI tests are explicitly skipped when `MUSE_TEST_BIN` is unset; the Magpie gateway group is skipped without `MAGPIE_TEST_BIN`. Official-CLI tests use a dummy credential in a separate temporary configuration and route requests only to a loopback test backend. They do not test a real Meta account. The gateway group enables subscription discovery in its isolated Magpie configuration because that is required for CLI-backed provider plugins; run it on a development/test machine. `MAGPIE_TEST_BUN` can point to an existing supported Bun executable.
+The default suite runs the inherited 48 legacy regression tests, pricing tests and CLI bridge tests. The three official-CLI tests are explicitly skipped when `MUSE_TEST_BIN` is unset; the Magpie gateway group is skipped without `MAGPIE_TEST_BIN`. Official-CLI regression tests use a dummy credential in a separate temporary configuration and route requests only to a loopback test backend. The gateway group enables subscription discovery in its isolated Magpie configuration because that is required for CLI-backed provider plugins; run it on a development/test machine. `MAGPIE_TEST_BUN` can point to an existing supported Bun executable.
 
-Validated in development: Node 24.22.1, Muse Code 1.4.15-R8339.1, Magpie 0.1.3903, Linux x64. Real CLI artifact size/SHA-256 and the Magpie release checksum were verified before execution. Live Meta subscription inference has not been validated in this environment.
+Validated in development: Node 24.22.1, Muse Code 1.4.15-R8339.1, Magpie 0.1.3903, Linux x64. Real CLI artifact size/SHA-256 and the Magpie release checksum were verified before execution. Separate live-account tests on 2026-11-13 passed streaming chat, client MCP file reads and conversation continuation for both Spark 1.3 and Spark 1.3 Contributor through Magpie. Live tests are opt-in and are not part of `npm test`.
 
 MIT. Original upstream copyright/license retained.

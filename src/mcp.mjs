@@ -52,7 +52,7 @@ export class ToolServer {
       let result
       if (msg.method === "initialize") result = {
         protocolVersion: "2025-03-26", capabilities: { tools: {} },
-        serverInfo: { name: "magpie-muse-client-tools", version: "0.2.0" },
+        serverInfo: { name: "magpie-muse-client-tools", version: "0.3.0" },
       }
       else if (msg.method === "ping") result = {}
       else if (msg.method === "tools/list") result = { tools: [...session.tools.values()].map(t => ({

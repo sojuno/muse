@@ -1,5 +1,30 @@
 # Validation record
 
+## Live account, contributor and USD reference costs — 2026-11-13
+
+The user completed the official `muse login` device flow. Separate live tests then ran through the actual Magpie gateway/Bun plugin host, the official Muse Code 1.4.15 CLI, and Meta's real service. No credential values were read by the plugin or copied into repository files/test fixtures.
+
+Both `muse-cli/muse-spark-1.3` and `muse-cli/muse-spark-1.3-contributor` passed:
+
+- Published in Magpie's model catalog; selected model retained through the request.
+- Streamed chat and a client-side MCP filesystem tool performing a real read of a randomly generated temporary file.
+- The tool result returned to the same Muse turn and the final answer contained the actual file contents.
+- A following message repeated the correct contents without calling a tool.
+- Separate CLI processes selected ordinary mode `off` and contributor mode `on`.
+
+Two further small live chat requests verified token counts and USD estimates in **Magpie's own Usage ledger**, the source used by its Usage UI:
+
+| Model | Prompt tokens | Output tokens | Cached input | API-reference USD |
+| --- | ---: | ---: | ---: | ---: |
+| muse-spark-1.3 | 18,505 | 23 | 0 | $0.023229 |
+| muse-spark-1.3-contributor | 18,505 | 23 | 0 | $0.0018551 |
+
+Each response included 11 reasoning tokens, already contained in the 23 output tokens. Token totals include the CLI's own instructions. The ledger totals matched the streamed usage and the calculation against Meta's public per-million-token rates. These are **reference estimates, not extra subscription charges**; see [PRICING.md](PRICING.md).
+
+Automated regression run with all test binaries enabled: **97 executed, 97 passed, 0 failed, 0 skipped** (48 legacy, 35 bridge, 5 pricing, 3 official CLI, 6 gateway including nested protocol/contributor/accounting checks). The contributor CLI regression also verifies that the **actual CLI wire request** retains `muse-spark-1.3-contributor`, rather than only relabeling its response.
+
+Live validation covers Spark 1.3 and its contributor variant, not every available Muse model. Subscription allowance cards, full cross-process pending-tool recovery, MCP resources/prompts and tiered Ember price export remain outside this implementation.
+
 ## Expanded capability check — 2026-11-13
 
 Full run with `MUSE_TEST_BIN` and `MAGPIE_TEST_BIN`: **88 executed, 88 passed, 0 failed, 0 skipped**. This includes 48 legacy tests, 34 bridge tests, two official Muse CLI cases, and four actual Magpie gateway tests (parent plus three protocols).

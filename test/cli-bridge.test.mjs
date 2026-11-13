@@ -38,6 +38,11 @@ test("plugin registers muse-cli, links the CLI without saving Meta credentials",
   assert.equal((await link.callback()).key, "local-muse-cli")
   const models = await hooks.provider.models({ models: {} })
   assert.ok(models["muse-spark-1.3"].capabilities.toolcall)
+  assert.ok(cfg.provider["muse-cli"].models["muse-spark-1.3-contributor"])
+  assert.equal(models["muse-spark-1.3-contributor"].api.id, "muse-spark-1.3-contributor")
+  assert.equal(models["muse-spark-1.3"].cost.input, 1.25)
+  assert.equal(models["muse-spark-1.3-contributor"].cost.input, 0.10)
+  assert.equal(models["muse-wonder-1.0-contributor"], undefined, "Only base models from the account's catalog receive contributor aliases")
 })
 
 test("scripted MSP child completes a text turn and keeps the same session", async t => {
@@ -346,4 +351,24 @@ test("a separate stdio filesystem MCP server executes a bridged client tool", as
   messages.push(first.choices[0].message, { role: "tool", tool_call_id: call.id, content: result.content })
   const last = await (await chat(bridge, messages, { tools: clientTools })).json()
   assert.equal(last.choices[0].message.content, secret)
+})
+
+test("plugin isolates ordinary and contributor CLI hosts and preserves the suffix", async t => {
+  const { options, requests } = await setup(t)
+  const hooks = await MuseCLIPlugin({}, options)
+  t.after(() => hooks.dispose())
+  const loader = await hooks.auth.loader()
+  for (const model of ["muse-spark-1.3", "muse-spark-1.3-contributor", "muse-spark-1.3"]) {
+    const res = await loader.fetch("http://muse-cli.invalid/v1/chat/completions", {
+      method: "POST", headers: { "x-magpie-session": "same-session" }, body: JSON.stringify({ model, messages: user("lane-test") }),
+    })
+    assert.equal(res.status, 200)
+    assert.equal((await res.json()).model, model)
+  }
+  const launches = requests().filter(r => r.method === "test/launch")
+  assert.equal(launches.length, 2)
+  assert.deepEqual(launches.map(r => { const i = r.params.args.indexOf("--contributor-mode"); return r.params.args[i + 1] }).sort(), ["off", "on"])
+  const selected = requests().filter(r => r.method === "session/start").map(r => r.params.modelId)
+  assert.ok(selected.includes("muse-spark-1.3"))
+  assert.ok(selected.includes("muse-spark-1.3-contributor"))
 })

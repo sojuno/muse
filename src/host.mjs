@@ -35,7 +35,9 @@ export class MuseHost {
     this.dataDirectory ??= fs.mkdtempSync(path.join(os.tmpdir(), "magpie-muse-host-"))
     const handshake = spawnMspConnection({
       command: findMuse(this.options.museBin ?? process.env.MUSE_CLI_BIN ?? "muse"),
-      args: [...(this.options.museArgs ?? []), "serve", "--preset", "empty", "--trust-workspace", "--disable-shell", "--disable-write", "--disable-request-user-input", ...(this.options.serveArgs ?? [])],
+      args: [...(this.options.museArgs ?? []), "serve", "--preset", "empty", "--trust-workspace", "--disable-shell", "--disable-write", "--disable-request-user-input",
+        ...(typeof this.options.contributorMode === "boolean" ? ["--contributor-mode", this.options.contributorMode ? "on" : "off"] : []),
+        ...(this.options.serveArgs ?? [])],
       env: { ...process.env, XDG_DATA_HOME: this.dataDirectory, ...(this.options.museEnv ?? {}) },
       cwd: this.options.hostDirectory,
       shutdownTimeoutMs: 1000,
@@ -47,7 +49,7 @@ export class MuseHost {
     try {
       const spawned = await Promise.race([
         handshake.initialize({
-          clientInfo: { name: "magpie_muse_cli", title: "Magpie Muse CLI bridge", version: "0.2.0" },
+          clientInfo: { name: "magpie_muse_cli", title: "Magpie Muse CLI bridge", version: "0.3.0" },
           capabilities: { requestedCapabilities: ["sessionMcp"], userInputDialogs: false },
         }),
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Muse CLI handshake timed out")), 20000) }),
