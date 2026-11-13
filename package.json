@@ -11,7 +11,9 @@
     "LICENSE",
     "icon.svg",
     "LEGACY-OAUTH.md",
-    "PRICING.md"
+    "PRICING.md",
+    "TESTING.md",
+    "UPSTREAM-REVIEW.md"
   ],
   "keywords": [
     "opencode",
@@ -36,7 +38,7 @@
     "doctor": "node bin/muse-cli.mjs doctor"
   },
   "type": "module",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "engines": {
     "node": ">=22"
   },

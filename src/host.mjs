@@ -9,7 +9,7 @@ export function findMuse(bin = "muse") {
     try { fs.accessSync(p, fs.constants.X_OK); return true } catch { return false }
   })
   try { if (!file) throw new Error(); fs.accessSync(file, fs.constants.X_OK) }
-  catch { throw new Error("Muse CLI not found. Install Muse Code 1.4.15 and run muse login, or set museBin in plugin options.") }
+  catch { throw new Error("Muse CLI not found. Install Muse Code and run muse login, or set museBin in plugin options.") }
   try {
     const version = fs.readFileSync(path.join(path.dirname(file), ".muse-version"), "utf8").trim()
     if (/^[\w.+-]+$/.test(version)) {
@@ -33,9 +33,11 @@ export class MuseHost {
   }
   async spawn() {
     this.dataDirectory ??= fs.mkdtempSync(path.join(os.tmpdir(), "magpie-muse-host-"))
+    this.executable = findMuse(this.options.museBin ?? process.env.MUSE_CLI_BIN ?? "muse")
     const handshake = spawnMspConnection({
-      command: findMuse(this.options.museBin ?? process.env.MUSE_CLI_BIN ?? "muse"),
+      command: this.executable,
       args: [...(this.options.museArgs ?? []), "serve", "--preset", "empty", "--trust-workspace", "--disable-shell", "--disable-write", "--disable-request-user-input",
+        "-c", 'run.reminder_roster={"agents":[]}',
         ...(typeof this.options.contributorMode === "boolean" ? ["--contributor-mode", this.options.contributorMode ? "on" : "off"] : []),
         ...(this.options.serveArgs ?? [])],
       env: { ...process.env, XDG_DATA_HOME: this.dataDirectory, ...(this.options.museEnv ?? {}) },
@@ -49,18 +51,22 @@ export class MuseHost {
     try {
       const spawned = await Promise.race([
         handshake.initialize({
-          clientInfo: { name: "magpie_muse_cli", title: "Magpie Muse CLI bridge", version: "0.3.0" },
+          clientInfo: { name: "magpie_muse_cli", title: "Magpie Muse CLI bridge", version: "0.3.2" },
           capabilities: { requestedCapabilities: ["sessionMcp"], userInputDialogs: false },
         }),
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Muse CLI handshake timed out")), 20000) }),
       ])
-      if (!spawned.initializeResult.grantedCapabilities?.includes("sessionMcp")) {
+      const { schema, serverInfo, grantedCapabilities } = spawned.initializeResult
+      const identity = `Muse CLI ${serverInfo?.version ?? "(unknown version)"} (${this.executable})`
+      // CLI release numbers are diagnostic metadata. MSP v1 allows additive
+      // schema evolution; the SDK exposes a fingerprint change as a warning.
+      if (schema?.version !== 1) {
         await spawned.close()
-        throw new Error("Muse CLI did not grant sessionMcp. Enable per-session MCP before using the client tool bridge.")
+        throw new Error(`${identity} uses unsupported MSP envelope version ${schema?.version ?? "(missing)"}. Update this plugin/SDK or choose a compatible CLI with museBin.`)
       }
-      if (!/^1\.4\.15(?:\D|$)/.test(spawned.initializeResult.serverInfo?.version ?? "")) {
+      if (!grantedCapabilities?.includes("sessionMcp")) {
         await spawned.close()
-        throw new Error("This bridge is pinned to Muse CLI 1.4.15. Update the CLI/SDK together.")
+        throw new Error(`${identity} did not grant sessionMcp. Enable per-session MCP before using the client tool bridge.`)
       }
       this.generation++
       this.running = spawned

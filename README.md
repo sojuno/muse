@@ -1,6 +1,6 @@
 # Magpie Muse CLI
 
-Use your **official Muse Code CLI** as a Magpie provider. Targets **Linux + Muse Code 1.4.15** with `@muse-code/sdk` pinned to the same version.
+Use your **official Muse Code CLI** as a Magpie provider. Tested on Linux with **Muse Code 1.4.15 and 1.4.18**. CLI release numbers are not locked; the bridge checks the MSP wire protocol and required capabilities. The SDK dependency is pinned for reproducible installs, independently of the CLI release number.
 
 ```text
 Your agent → Magpie → this plugin → muse serve → Meta
@@ -14,7 +14,7 @@ This replaces the package entry point of the earlier direct-OAuth plugin. Its so
 
 ## Install in Magpie
 
-Install Muse Code from its official source, verify `muse --version` reports **1.4.15**, and sign in using `muse login` if you have not already. Existing CLI authentication is reused.
+Install Muse Code from its official source, check `muse --version`, and sign in using `muse login` if you have not already. Existing CLI authentication is reused. You do not need to downgrade Muse to 1.4.15.
 
 From the main branch:
 
@@ -49,13 +49,28 @@ magpie plugin options magpie-muse-cli '{"museBin":"/home/you/.local/bin/muse"}'
 
 Folder installs can be named by their absolute folder path instead. Magpie restarts its plugin host when options change. After editing source files, turn the plugin off and on in Magpie.
 
+### Updating and CLI compatibility
+
+If an older plugin says **“This bridge is pinned to Muse CLI 1.4.15”**, update the plugin checkout:
+
+```sh
+git pull --ff-only
+npm ci --ignore-scripts
+```
+
+Then turn this plugin off and on in Magpie and retry linking. That error came from the old plugin's release-number check, even when Muse was already installed correctly. Version 0.3.2 removes it.
+
+The host must implement MSP envelope v1 and grant `sessionMcp`. The SDK treats an additive schema fingerprint change as a compatibility warning, not a reason to reject a newer CLI. A genuinely unsupported envelope or missing capability still fails with the detected CLI version and executable path. This does not guarantee that every future CLI change will be compatible; `npm run doctor` tests the installed CLI with an offline echo turn, and `doctor --live` additionally tests the actual account.
+
+`MUSE_CLI_BIN=/absolute/path/to/muse npm run doctor` shows the executable selected. Magpie GUI applications can have a different PATH from a terminal; set `museBin` in plugin Options if needed. The CLI's model catalog supplies available models rather than restricting discovery to a static list.
+
 ## Working directory and tool permissions
 
 Magpie passes the client's project through `X-Magpie-Work-Dir`. The plugin decodes and validates that directory. A remote agent's path must exist on the Magpie machine; otherwise configure `workspace` explicitly. It never substitutes Magpie's configuration directory for your project.
 
 The actual Muse session runs in a new, empty directory owned by the bridge, **not in your repository**. Muse is launched with `--preset empty --trust-workspace --disable-shell --disable-write --disable-request-user-input`; session MCP requires workspace trust, so only that empty directory is trusted. The session selects Muse's built-in `:ask-me` permission profile. Client MCP calls are admitted once; the agent still controls their actual execution and approval. No persistent approval rules are written.
 
-The real-CLI regression test inspects the primary model request and verifies it offers only the `mcp__magpie_client` tool namespace. The CLI may run its own internal reminder bookkeeping separately.
+The real-CLI regression test inspects the primary model request and verifies it offers only the `mcp__magpie_client` tool namespace. The host also sets an empty `run.reminder_roster` so internal reminder observers do not generate extra model requests; this is checked with both tested CLI releases.
 
 Do not point Muse's `endpoint_transport` back at the same Magpie provider: that creates a routing loop. Use the normal Meta CLI provider for live use. The bridge never edits your Muse settings or credentials. Turn logs live in a temporary data directory, removed when the bridge closes normally; a force-killed host can leave temporary files for OS cleanup.
 
@@ -115,6 +130,8 @@ Set `referencePricing: false` to disable the bundled public-price snapshot, or s
 - Supports Chat Completions streaming/non-streaming, reasoning text, usage counts, inline images, function tools, parallel tool results, cancellation and named reasoning effort.
 - Immediate CLI authentication/quota failures retain HTTP 401/429, including for streaming requests before output starts. Failures after output starts are reported in the SSE stream.
 - Keeps the same Muse session across client tool steps and subsequent messages. Session identity includes conversation, subagent and project. Changed history, model, system instructions or tool definitions starts a new session seeded from the supplied history.
+- Equivalent tool schemas with different JSON key ordering, or a reordered tool list, preserve the session. Duplicate names and invalid schema containers fail before a turn starts.
+- A native event gap, truncated completed answer or disagreement with already streamed text produces an explicit error. Replayed token-usage cursors are counted only once.
 - After a plugin/CLI restart, conversation history can seed a new session. A lost pending tool step is rejected explicitly; retry from the user turn. There is no cross-process restoration of a tool call waiting for its result.
 - Return all tool results from one response together, using their original ids and tool definitions. New turns are rejected while previous tools are pending.
 - `tool_choice: "none"` prevents bridge tool execution. Named choices expose only that tool. Required/named choices are also communicated to Muse in the prompt; this is not a native model-level tool-choice guarantee.
@@ -144,6 +161,8 @@ MUSE_TEST_BIN=/absolute/path/to/muse MAGPIE_TEST_BIN=/absolute/path/to/magpie np
 
 The default suite runs the inherited 48 legacy regression tests, pricing tests and CLI bridge tests. The three official-CLI tests are explicitly skipped when `MUSE_TEST_BIN` is unset; the Magpie gateway group is skipped without `MAGPIE_TEST_BIN`. Official-CLI regression tests use a dummy credential in a separate temporary configuration and route requests only to a loopback test backend. The gateway group enables subscription discovery in its isolated Magpie configuration because that is required for CLI-backed provider plugins; run it on a development/test machine. `MAGPIE_TEST_BUN` can point to an existing supported Bun executable.
 
-Validated in development: Node 24.22.1, Muse Code 1.4.15-R8339.1, Magpie 0.1.3903, Linux x64. Real CLI artifact size/SHA-256 and the Magpie release checksum were verified before execution. Separate live-account tests on 2026-11-13 passed streaming chat, client MCP file reads and conversation continuation for both Spark 1.3 and Spark 1.3 Contributor through Magpie. Live tests are opt-in and are not part of `npm test`.
+Validated in development: Node 24.22.1, Muse Code 1.4.15-R8339.1 and 1.4.18-R8587.1, Magpie 0.1.3903, Linux x64. Official CLI artifact sizes/SHA-256 and the Magpie release checksum were verified before execution. Separate live-account tests cover Spark 1.3, Spark 1.3 Contributor and Wonder 1.0; see [TESTING.md](TESTING.md) for the exact runs and scope. Live tests are opt-in and are not part of `npm test`.
+
+The SDK transport, authentication boundaries and implementation tradeoffs of another community bridge were reviewed before adopting selected compatibility and robustness ideas; see [UPSTREAM-REVIEW.md](UPSTREAM-REVIEW.md).
 
 MIT. Original upstream copyright/license retained.

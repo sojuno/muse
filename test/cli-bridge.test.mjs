@@ -163,6 +163,71 @@ test("missing CLI and withheld sessionMcp are actionable failures", async t => {
   assert.equal(res.status, 503); assert.match((await res.json()).error.message, /sessionMcp/)
 })
 
+for (const version of ["1.4.18-R8587.1", "Muse Code 1.4.18 (1.4.18-R8587.1)", "2.0.0"]) test(`compatible MSP is accepted regardless of CLI release label: ${version}`, async t => {
+  const { bridge } = await setup(t, { museEnv: { FAKE_CLI_VERSION: version, FAKE_FINGERPRINT: "sha256:" + "0".repeat(64) } })
+  const res = await chat(bridge, user("compatible CLI"))
+  assert.equal(res.status, 200)
+  assert.equal((await res.json()).choices[0].message.content, "Echo: compatible CLI")
+  assert.equal(bridge.host.running.initializeResult.serverInfo.version, version)
+  assert.ok(bridge.host.running.fingerprintWarning, "Additive schema changes are SDK warnings, not release-number failures")
+})
+
+test("unsupported wire envelope is rejected with the actual CLI identity", async t => {
+  const { bridge } = await setup(t, { museEnv: { FAKE_CLI_VERSION: "1.4.18-R8587.1", FAKE_SCHEMA_VERSION: "2" } })
+  const res = await chat(bridge, user("incompatible envelope"))
+  assert.equal(res.status, 503)
+  const message = (await res.json()).error.message
+  assert.match(message, /1\.4\.18-R8587\.1/)
+  assert.match(message, /unsupported MSP envelope version 2/)
+  assert.ok(message.includes(process.execPath), "Identify the executable Magpie actually selected")
+})
+
+test("equivalent tool schemas and tool ordering preserve a pending native turn", async t => {
+  const { bridge, requests } = await setup(t)
+  const firstTools = [tools[0], { type: "function", function: { name: "second_tool", parameters: { type: "object", properties: {} } } }]
+  const messages = user("CALL_TOOL")
+  const first = await (await chat(bridge, messages, { tools: firstTools })).json()
+  const call = first.choices[0].message.tool_calls[0]
+  const equivalent = [firstTools[1], { type: "function", function: { parameters: { required: ["path"], properties: { path: { type: "string" } }, type: "object" }, description: "read", name: "fs/read.file" } }]
+  messages.push(first.choices[0].message, { role: "tool", tool_call_id: call.id, content: "UNCHANGED-SCHEMA" })
+  const res = await chat(bridge, messages, { tools: equivalent })
+  assert.equal(res.status, 200)
+  assert.equal((await res.json()).choices[0].message.content, "UNCHANGED-SCHEMA")
+  messages.push({ role: "assistant", content: "UNCHANGED-SCHEMA" }, { role: "user", content: "follow up" })
+  assert.equal((await chat(bridge, messages, { tools: equivalent })).status, 200)
+  assert.equal(requests().filter(r => r.method === "session/start").length, 1)
+})
+
+test("duplicate tools and invalid parameter schemas fail before starting a native turn", async t => {
+  const { bridge, requests } = await setup(t)
+  for (const offered of [[tools[0], tools[0]], [{ type: "function", function: { name: "bad", parameters: [] } }]]) {
+    assert.equal((await chat(bridge, user("hello"), { tools: offered })).status, 400)
+  }
+  assert.equal(requests().filter(r => r.method === "turn/start").length, 0)
+})
+
+for (const marker of ["EVENT_GAP", "TRUNCATED", "TEXT_CHANGED"]) for (const stream of [false, true]) test(`incomplete native output cannot finish as a successful answer: ${marker}, stream=${stream}`, async t => {
+  const { bridge } = await setup(t)
+  const res = await chat(bridge, user(marker), { stream })
+  if (res.ok) {
+    assert.ok(stream)
+    const output = await decode(res)
+    assert.ok(output.chunks.some(chunk => chunk.error), "A failure after streaming starts must be explicit")
+    assert.equal(output.chunks.some(chunk => chunk.choices?.some(choice => choice.finish_reason === "stop")), false)
+  } else {
+    assert.equal(res.status, 502)
+    assert.match((await res.json()).error.message, /gap|truncated|disagrees/)
+  }
+})
+
+test("replayed usage notifications are counted once", async t => {
+  const { bridge } = await setup(t)
+  const res = await chat(bridge, user("TOKEN_SPLITS DUPLICATE_USAGE"))
+  assert.equal(res.status, 200)
+  assert.deepEqual((await res.json()).usage, { prompt_tokens: 19, completion_tokens: 4, total_tokens: 23,
+    prompt_tokens_details: { cached_tokens: 6, cache_write_tokens: 3 }, completion_tokens_details: { reasoning_tokens: 2 } })
+})
+
 test("requires a real client directory and refuses foreign destinations", async t => {
   const { bridge } = await setup(t)
   const res = await chat(bridge, user("hi"), {}, { "x-magpie-work-dir": "%ZZ" })

@@ -11,6 +11,10 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 const errorResponse = (status, message) => Response.json({ error: { type: "muse_cli_error", message } }, { status })
 const textOf = content => typeof content === "string" ? content : Array.isArray(content) ? content.filter(p => p.type === "text").map(p => p.text).join("\n") : ""
 const historyKey = messages => JSON.stringify(messages.map(m => ({ role: m.role, content: m.content ?? "", ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}), ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}) })))
+const canonicalTools = tools => JSON.stringify([...tools.values()].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0), (_key, value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value
+  return Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]]))
+})
 
 class Events {
   values = []
@@ -24,9 +28,11 @@ class Events {
 function toolsOf(body) {
   const tools = new Map()
   for (const item of body.tools ?? []) {
-    if (item.type !== "function" || !item.function?.name) throw new Error("Only function tools are supported by the Muse CLI bridge")
+    if (item.type !== "function" || typeof item.function?.name !== "string" || !item.function.name) throw new Error("Only named function tools are supported by the Muse CLI bridge")
     const t = item.function
     const bridgeName = `tool_${hash(t.name).slice(0, 24)}`
+    if (tools.has(bridgeName)) throw new Error(`Duplicate tool name: ${t.name}`)
+    if (t.parameters != null && (typeof t.parameters !== "object" || Array.isArray(t.parameters))) throw new Error(`Invalid parameters schema for tool: ${t.name}`)
     tools.set(bridgeName, { ...t, bridgeName, parameters: t.parameters ?? { type: "object", properties: {} } })
   }
   if (typeof body.tool_choice === "object") {
@@ -162,6 +168,7 @@ class Session {
     // first deltas/completion in the same pipe read, before await resumes.
     if (this.admitting) { this.earlyNotifications.push(n); return }
     if (p.turnId && this.turnId && p.turnId !== this.turnId) return
+    if (n.method === "view/gap") return this.cancel("Muse CLI reported a gap in its event stream. Retry from the last user turn.", 502)
     if (n.method === "approval/requested" || n.method === "approval/updated") {
       // Only the bridge MCP is trusted. Native tool approvals are denied; the
       // host is also started with the empty preset and shell/writes disabled.
@@ -184,8 +191,9 @@ class Session {
     if (n.method.startsWith("item/") && p.item) {
       const item = p.item
       if (this.turnId && item.turnId !== this.turnId) return
+      if (item.kind === "agentMessage" && n.method === "item/completed" && item.truncated) return this.cancel("Muse CLI truncated its completed answer. Retry from the last user turn.", 502)
       this.items.set(item.itemId, item)
-      if (item.kind === "agentMessage") this.full(item.itemId, "text", item.text, "text")
+      if (item.kind === "agentMessage") this.full(item.itemId, "text", item.text, "text", n.method === "item/completed")
       if (item.kind === "reasoning" && n.method === "item/completed") {
         for (const [i, text] of (item.summary ?? []).entries()) this.full(item.itemId, `summary.${i}`, text, "reasoning")
       }
@@ -206,9 +214,10 @@ class Session {
       error: p.error ? (p.error.kind === "authRequired" ? "Muse is not signed in. Run muse login in a terminal." : p.error.message ?? "Muse turn failed") : p.terminal === "failed" ? (p.reason ?? "Muse turn failed") : undefined,
     })
   }
-  full(id, field, full, type) {
-    if (!full) return
+  full(id, field, full, type, completed = false) {
+    if (typeof full !== "string") return
     const key = `${id}/${field}`, seen = this.streamed.get(key) ?? ""
+    if (completed && !full.startsWith(seen)) return this.cancel("Muse CLI's completed answer disagrees with its streamed text. Retry from the last user turn.", 502)
     if (full.startsWith(seen) && full.length > seen.length) {
       this.streamed.set(key, full)
       this.events.push({ type, text: full.slice(seen.length) })
@@ -225,10 +234,10 @@ class Session {
     this.pending.clear()
     this.events.push({ type: "done", ...event })
   }
-  cancel(message = "Request cancelled") {
+  cancel(message = "Request cancelled", status = 499) {
     this.cancelled = true
     const cancelling = this.active && this.turnId ? this.bridge.host.command("turn/cancel", { sessionId: this.id, turnId: this.turnId }).catch(() => {}) : Promise.resolve()
-    this.finish({ error: message, status: 499 })
+    this.finish({ error: message, status })
     return cancelling
   }
   async close() {
@@ -277,7 +286,7 @@ export class MuseBridge {
       let session = pending ?? this.sessions.get(key)
       if (session?.busy) return errorResponse(409, "Another request is already reading this Muse session")
       if (session?.active && !pending) return errorResponse(409, "Muse is waiting for client tool results; do not resend the user turn")
-      const signature = hash(JSON.stringify([...tools.values()]))
+      const signature = hash(canonicalTools(tools))
       if (pending && signature !== pending.signature) return errorResponse(409, "Tool definitions changed while Muse is waiting for their results; finish the pending turn with the original tool definitions")
       const sys = hash(JSON.stringify(body.messages.filter(m => m.role === "system" || m.role === "developer")))
       if (!pending && session && (session.generation !== this.host.generation || session.model !== body.model || session.signature !== signature || session.system !== sys || !session.completedHistory || historyKey(body.messages.slice(0, session.completedHistory.length)) !== historyKey(session.completedHistory))) {
@@ -311,7 +320,7 @@ export class MuseBridge {
         }
         return await this.response(session, body, request.signal, done)
       } catch (e) { done(); throw e }
-    } catch (e) { return errorResponse(e.name === "AbortError" ? 499 : /not found|grant|handshake|pinned/.test(e.message) ? 503 : 400, e.message) }
+    } catch (e) { return errorResponse(e.name === "AbortError" ? 499 : /not found|grant|handshake|unsupported MSP/.test(e.message) ? 503 : 400, e.message) }
   }
   async response(session, body, signal, release) {
     const id = `chatcmpl-${randomUUID()}`

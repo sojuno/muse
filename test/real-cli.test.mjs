@@ -9,13 +9,13 @@ import { MuseBridge } from "../src/bridge.mjs"
 
 // This test uses the unmodified official Linux CLI, with a deterministic API on
 // loopback. No Meta login, real credential or subscription quota is involved.
-for (const [stream, contributorMode] of [[false, false], [true, false], [true, true]]) test(`official Muse 1.4.15: MCP tools cross client HTTP turns (stream=${stream}, contributor=${contributorMode})`, { skip: !process.env.MUSE_TEST_BIN, timeout: 30000 }, async t => {
+for (const [stream, contributorMode] of [[false, false], [true, false], [true, true]]) test(`official Muse CLI: MCP tools cross client HTTP turns (stream=${stream}, contributor=${contributorMode})`, { skip: !process.env.MUSE_TEST_BIN, timeout: 30000 }, async t => {
   const model = `muse-spark-1.3${contributorMode ? "-contributor" : ""}`
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "muse-real-cli-test-"))
   const museEnv = { XDG_CONFIG_HOME: path.join(directory, "config"), XDG_DATA_HOME: path.join(directory, "data"), XDG_CACHE_HOME: path.join(directory, "cache"), META_API_KEY: "test-only-local-backend" }
   const auth = spawnSync(process.env.MUSE_TEST_BIN, ["auth", "set", "--provider", "meta", "--api-key-stdin"], { input: "test-only-local-backend\n", env: { ...process.env, ...museEnv }, encoding: "utf8" })
   assert.equal(auth.status, 0, auth.stderr)
-  const primary = [], outputs = [], approvals = []
+  const primary = [], outputs = [], approvals = [], internal = []
   const server = http.createServer(async (req, res) => {
     const chunks = []; for await (const c of req) chunks.push(c)
     if (req.method === "GET") {
@@ -31,6 +31,7 @@ for (const [stream, contributorMode] of [[false, false], [true, false], [true, t
       if (!results.length) output = group.tools.map((tool, i) => ({ type: "function_call", id: `fc_client_${i}`, call_id: `call_client_${i}`, name: `${group.name}.${tool.name}`, arguments: '{"path":"example.txt"}', status: "completed" }))
       else output = [{ type: "message", id: "msg_final", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Verified client tool output.", annotations: [] }] }]
     } else {
+      internal.push(body)
       // The CLI may ask its own reminder child to submit a bookkeeping decision.
       const group = body.tools?.[0], name = group?.tools?.[0]?.name
       output = name === "submit_reminder_decision" ? [{ type: "function_call", id: "fc_reminder", call_id: "call_reminder", name: `${group.name}.${name}`, arguments: JSON.stringify({ decision: "none", reason: "No reminder needed", advisory_text: null, confidence: null, priority: null, skill_id: null, visible_for_steps: null }), status: "completed" }] : [{ type: "message", id: "msg_internal", role: "assistant", status: "completed", content: [{ type: "output_text", text: "OK", annotations: [] }] }]
@@ -106,6 +107,7 @@ for (const [stream, contributorMode] of [[false, false], [true, false], [true, t
   assert.equal(sum(u => u.completion_tokens_details.reasoning_tokens), primary.length)
   assert.ok(primary.every(p => p.model === model), "The actual CLI wire request must retain the selected model, including its contributor suffix")
   assert.ok(primary.every(p => p.tools.every(group => group.name === "mcp__magpie_client")), "Main agent must be offered client tools only")
+  assert.equal(internal.length, 0, "Reminder observers must not generate hidden model requests")
   assert.ok(approvals.some(a => a.decision === "approved"))
   assert.equal(approvals.some(a => a.decision === "approvedForSession" || a.decision === "approvedPolicyAmendment"), false)
 })

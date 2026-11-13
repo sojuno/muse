@@ -1,5 +1,26 @@
 # Validation record
 
+## CLI compatibility and community bridge review — 2026-11-13, v0.3.2
+
+The previous plugin incorrectly rejected any CLI whose release string did not start with `1.4.15`, even after a successful MSP handshake. That caused Magpie's **“Sign-in didn't finish / This bridge is pinned to Muse CLI 1.4.15”** error for a correctly installed 1.4.18 CLI. The exact-release gate is removed. Compatibility uses the MSP envelope and `sessionMcp` grant; additive SDK fingerprint differences are warnings, as specified by the official SDK.
+
+Downloaded official **Muse Code 1.4.18 (1.4.18-R8587.1)** from Meta's stable-channel manifest and verified **485,689,688 bytes**, SHA-256 `57732db89e25a58196c923b3790aa3e2a85b8d1ad5094492384792260e65b538`, before execution. SDK 1.4.15 was still the latest npm SDK observed, and works against this newer CLI in the checks below.
+
+- **115 executed, 115 passed, 0 failed, 0 skipped** with the 1.4.18 binary and actual Magpie/Bun gateway enabled. This includes compatible release-label/fingerprint changes, rejection of unsupported wire envelopes, canonical tool comparisons, duplicate/invalid tools, explicit failures for gaps/truncation/text disagreement, and usage-cursor deduplication.
+- All three official-CLI integration cases also passed on **1.4.15**: normal buffered, normal streaming, contributor streaming. Both CLI releases retained exact tool/token behavior and made **zero internal reminder model requests** with the empty reminder roster.
+- `doctor` passed a real 1.4.18 offline echo turn, printed the selected executable and observed CLI version, and exposed the fingerprint difference as a warning.
+- Reviewed the community bridge at a specific commit and applied selected ideas; see [UPSTREAM-REVIEW.md](UPSTREAM-REVIEW.md). No upstream runtime code was copied or executed. `npm audit --omit=dev` reported **0 known vulnerabilities** in this package's dependency tree; this is an advisory check, not proof of absence of malicious code.
+
+Separate live tests then ran through **real Magpie → Bun plugin → official 1.4.18 CLI → Meta**, using the existing account. Each model passed streaming, a real client MCP temporary-file read and result, a subsequent user message without tools, and exact response/Usage-ledger agreement:
+
+| Model | Uncached input | Cache read | Cache write* | Whole prompt | Output | Reasoning† | Total |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| muse-spark-1.3 | 20,676 | 40,290 | 0 | 60,966 | 310 | 128 | 61,276 |
+| muse-spark-1.3-contributor | 20,648 | 40,290 | 0 | 60,938 | 305 | 124 | 61,243 |
+| muse-wonder-1.0 | 20,667 | 40,296 | 0 | 60,963 | 301 | 115 | 61,264 |
+
+*No separate cache-write count was reported by these live sessions; nonzero write transport remains covered by gateway regressions. †Reasoning is included in output; cache is included in whole prompt. Each row sums all three client requests in that model's live workflow. Account credentials and actual temporary-file contents were not stored in the repository. This validates these models and the tested CLI releases, not every future CLI build or every MCP feature.
+
 ## Complete token counters and Wonder — 2026-11-13, v0.3.1
 
 Live checks used the user's existing official CLI login through **Magpie 0.1.3903 → Bun plugin → Muse Code 1.4.15 → Meta**. Spark 1.3, Spark 1.3 Contributor and **Wonder 1.0** each passed streamed chat, a real client-side stdio MCP file read, returning the actual file contents, and a following user message without tools. Each workflow made three client HTTP requests.

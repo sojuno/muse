@@ -24,7 +24,8 @@ async function turn(sessionId, turnId, input) {
     if (!user.includes("TOKEN_SPLITS")) return
     completions++
     notify("session/tokenUsage", { sessionId, turnId, usage: tokenSplit, promptTokens: 19, totalTokens: 23,
-      cumulative: { promptTokens: completions * 19, outputTokens: completions * 4, totalTokens: completions * 23 } })
+      viewCursor: `usage-${completions}`, cumulative: { promptTokens: completions * 19, outputTokens: completions * 4, totalTokens: completions * 23 } })
+    if (user.includes("DUPLICATE_USAGE")) notify("session/tokenUsage", { sessionId, turnId, usage: tokenSplit, promptTokens: 19, totalTokens: 23, viewCursor: `usage-${completions}` })
   }
   try {
     if (user.includes("CRASH")) process.exit(7)
@@ -48,6 +49,7 @@ async function turn(sessionId, turnId, input) {
       answer = all.map(r => r.content.map(c => c.text).join("")).join(" | ")
     }
     if (state.cancelled) return
+    if (user.includes("EVENT_GAP")) { notify("view/gap", { sessionId, turnId }); return }
     const itemId = randomUUID()
     if (user.includes("REASON")) {
       const reasonId = randomUUID()
@@ -57,7 +59,7 @@ async function turn(sessionId, turnId, input) {
     }
     notify("item/started", { sessionId, item: { itemId, turnId, kind: "agentMessage", text: "" } })
     if (!user.includes("COMPLETE_ONLY")) notify("item/delta", { sessionId, itemId, field: "text", delta: answer })
-    notify("item/completed", { sessionId, item: { itemId, turnId, kind: "agentMessage", text: answer } })
+    notify("item/completed", { sessionId, item: { itemId, turnId, kind: "agentMessage", text: user.includes("TEXT_CHANGED") ? "Different completed answer" : answer, ...(user.includes("TRUNCATED") ? { truncated: true } : {}) } })
     reportUsage()
     const usage = user.includes("TOKEN_SPLITS") ? Object.fromEntries(Object.entries(tokenSplit).map(([key, value]) => [key, value * completions])) : { inputTokens: 12, outputTokens: 4, cachedTokens: 2 }
     notify("turn/completed", { sessionId, turnId, terminal: "completed", ...(user.includes("USAGE_EVENTS_ONLY") ? {} : { usage }) })
@@ -75,8 +77,8 @@ lines.on("line", async line => {
   try {
     if (method === "initialize") return result({
       experimentalApi: false, grantedCapabilities: process.env.FAKE_NO_MCP ? [] : ["sessionMcp"],
-      schema: { version: 1, fingerprint: EXPECTED_SCHEMA_FINGERPRINT },
-      serverInfo: { name: "test-muse", version: "1.4.15" }, sessionDurability: "durable", museHome: "/tmp/fake-muse", platformFamily: "unix", platformOs: "linux",
+      schema: { version: Number(process.env.FAKE_SCHEMA_VERSION ?? 1), fingerprint: process.env.FAKE_FINGERPRINT ?? EXPECTED_SCHEMA_FINGERPRINT },
+      serverInfo: { name: "test-muse", version: process.env.FAKE_CLI_VERSION ?? "1.4.15" }, sessionDurability: "durable", museHome: "/tmp/fake-muse", platformFamily: "unix", platformOs: "linux",
     })
     if (method === "model/list") return result({ models: [{ modelId: "muse-spark-1.3", displayLabel: "Muse Spark", contextLimit: 1048576, outputLimit: 65536, variants: ["low", "high"] }] })
     if (method === "session/start") {

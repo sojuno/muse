@@ -11,11 +11,14 @@ const counters = usage => ({
 // whose cache convention can differ. Emit each token only once across replies.
 export class TurnUsage {
   observed = false
+  cursors = new Set()
   raw = { prompt: 0, output: 0, read: 0, write: 0, reasoning: 0 }
   sent = { ...this.raw, total: 0 }
   prompt = 0
   total = 0
   add(params) {
+    if (params.viewCursor && this.cursors.has(params.viewCursor)) return
+    if (params.viewCursor) this.cursors.add(params.viewCursor)
     const usage = counters(params.usage)
     this.observed = true
     for (const key of Object.keys(this.raw)) this.raw[key] += usage[key]

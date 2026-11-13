@@ -5,7 +5,7 @@ import fs from "node:fs"
 import { MuseBridge } from "../src/bridge.mjs"
 
 if (process.argv[2] !== "doctor") {
-  console.error("Usage: magpie-muse-cli doctor [--live]\nSet MUSE_CLI_BIN to your Muse Code 1.4.15 executable. --live spends a small amount of plan quota.")
+  console.error("Usage: magpie-muse-cli doctor [--live]\nSet MUSE_CLI_BIN to your Muse Code executable. --live spends a small amount of plan quota.")
   process.exitCode = 1
 } else {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "magpie-muse-doctor-"))
@@ -14,7 +14,9 @@ if (process.argv[2] !== "doctor") {
   try {
     await bridge.start()
     const host = await bridge.host.start()
+    console.log(`Executable: ${bridge.host.executable}`)
     console.log(`Muse ${host.initializeResult.serverInfo.version}; sessionMcp granted; ${live ? "live" : "offline echo"} mode`)
+    if (host.fingerprintWarning) console.log("MSP schema fingerprint differs from the SDK baseline (compatibility warning, not a version rejection).")
     const res = await bridge.fetch("http://muse-cli.invalid/v1/chat/completions", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ model: live ? "muse-spark-1.3" : "echo", messages: [{ role: "user", content: "Reply with just OK; do not call any tools." }] }),
