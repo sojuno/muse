@@ -1,5 +1,23 @@
 # Validation record
 
+## Wonder Contributor, MCP and reasoning — 2026-11-13, v0.3.3
+
+Added `muse-cli/muse-wonder-1.0-contributor` when the account's native catalog includes Wonder 1.0. The previous plugin only generated Spark contributor aliases. An explicit contributor row supplied by a future CLI catalog is retained with its own metadata. Wonder Contributor has no bundled reference price and does not inherit the ordinary model's price; all token reporting is independent of pricing.
+
+A direct live probe with official **Muse 1.4.18-R8587.1**, contributor mode `on` and the user's existing CLI login succeeded. Native `session/tokenUsage.modelId` was exactly **`muse-wonder-1.0-contributor`**, not the ordinary Wonder id. It reported 19,500 prompt tokens, 29 output tokens and 13 reasoning tokens for a short test reply.
+
+A further live workflow ran through **Magpie → Bun plugin → official CLI → Meta** using the new model entry. Streamed chat requested a real client-side stdio MCP filesystem read, returned the actual random temporary-file contents and continued the conversation without another tool call. `reasoning_effort: low` was selected. Responses matched Magpie's own Usage ledger exactly across the three HTTP requests:
+
+| Model | Uncached input | Cache read | Cache write* | Whole prompt | Output | Reasoning† | Total |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| muse-wonder-1.0-contributor | 20,711 | 40,296 | 0 | 61,007 | 316 | 135 | 61,323 |
+
+*No separate cache-write count was reported live; nonzero read/write transport is tested through the gateway. †Reasoning is included in output. This live workflow exposed reasoning tokens but **no reasoning text**. The plugin forwards summary text if the CLI supplies it; it cannot create text the model does not expose.
+
+**119 executed, 119 passed, 0 failed, 0 skipped** with the official 1.4.18 CLI and real Magpie/Bun gateway enabled. The four official-CLI/local-backend cases verify that the native wire model retains its contributor suffix, reasoning effort reaches the model request, reasoning summaries reach streaming and buffered clients without duplication, and MCP tools continue the same turn. Wonder Contributor is included; all four cases also pass with the official 1.4.15 binary. Additional gateway checks preserve nonzero cache read/write and reasoning counts in Chat, Responses and Messages, plus a streamed Wonder Contributor MCP/reasoning round trip.
+
+MCP support here means **tools supplied by the client**, including tools backed by a real stdio MCP server. It does not add MCP resources/prompts, server OAuth management or every native CLI feature. The new live result verifies Wonder **1.0 Contributor**, not an untested Wonder Full contributor variant or every possible MCP server.
+
 ## CLI compatibility and community bridge review — 2026-11-13, v0.3.2
 
 The previous plugin incorrectly rejected any CLI whose release string did not start with `1.4.15`, even after a successful MSP handshake. That caused Magpie's **“Sign-in didn't finish / This bridge is pinned to Muse CLI 1.4.15”** error for a correctly installed 1.4.18 CLI. The exact-release gate is removed. Compatibility uses the MSP envelope and `sessionMcp` grant; additive SDK fingerprint differences are warnings, as specified by the official SDK.

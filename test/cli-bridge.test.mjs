@@ -15,7 +15,7 @@ const tools = [{ type: "function", function: { name: "fs/read.file", description
 async function setup(t, extra = {}) {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "muse-bridge-test-"))
   const log = path.join(workspace, "requests.jsonl")
-  const options = { workspace, museBin: process.execPath, museArgs: [fake], museEnv: { FAKE_CLI_LOG: log }, ...extra }
+  const options = { workspace, museBin: process.execPath, museArgs: [fake], ...extra, museEnv: { FAKE_CLI_LOG: log, ...extra.museEnv } }
   const bridge = new MuseBridge(options)
   t.after(async () => { await bridge.close(); fs.rmSync(workspace, { recursive: true, force: true }) })
   return { bridge, options, requests: () => fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n").map(JSON.parse) : [] }
@@ -43,6 +43,38 @@ test("plugin registers muse-cli, links the CLI without saving Meta credentials",
   assert.equal(models["muse-spark-1.3"].cost.input, 1.25)
   assert.equal(models["muse-spark-1.3-contributor"].cost.input, 0.10)
   assert.equal(models["muse-wonder-1.0-contributor"], undefined, "Only base models from the account's catalog receive contributor aliases")
+})
+
+test("Wonder contributor is discovered, routed to a contributor host and retains its exact native id", async t => {
+  const { options, requests } = await setup(t, { museEnv: { FAKE_MODELS: '["muse-wonder-1.0"]' } })
+  const hooks = await MuseCLIPlugin({}, options)
+  t.after(() => hooks.dispose())
+  const models = await hooks.provider.models({ models: {} })
+  const selected = models["muse-wonder-1.0-contributor"]
+  assert.ok(selected.capabilities.toolcall)
+  assert.ok(selected.capabilities.reasoning)
+  assert.equal(selected.api.id, "muse-wonder-1.0-contributor")
+  assert.equal(selected.cost, undefined, "Do not reuse normal Wonder's reference price for Contributor")
+  const loader = await hooks.auth.loader()
+  const res = await loader.fetch("http://muse-cli.invalid/v1/chat/completions", { method: "POST", body: JSON.stringify({ model: selected.api.id, messages: user("Wonder contributor") }) })
+  assert.equal(res.status, 200)
+  assert.equal((await res.json()).model, selected.api.id)
+  assert.ok(requests().some(r => r.method === "session/start" && r.params.modelId === selected.api.id))
+  assert.ok(requests().filter(r => r.method === "test/launch").some(r => {
+    const i = r.params.args.indexOf("--contributor-mode")
+    return r.params.args[i + 1] === "on"
+  }))
+})
+
+test("an explicit contributor catalog row keeps its own metadata", async t => {
+  const native = { modelId: "muse-wonder-1.0-contributor", displayLabel: "Native Wonder Contributor", cost: { input: 0.7, output: 1.1, cached: 0.2, currency: "USD" } }
+  const { options } = await setup(t, { museEnv: { FAKE_MODELS: JSON.stringify([native, "muse-wonder-1.0"]) } })
+  const hooks = await MuseCLIPlugin({}, options)
+  t.after(() => hooks.dispose())
+  const models = await hooks.provider.models({ models: {} })
+  assert.equal(models[native.modelId].name, native.displayLabel)
+  assert.equal(models[native.modelId].cost.input, 0.7)
+  assert.equal(models[native.modelId].cost.output, 1.1)
 })
 
 test("scripted MSP child completes a text turn and keeps the same session", async t => {

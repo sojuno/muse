@@ -11,7 +11,7 @@ These are **USD estimates at public API list prices**, not invoices or extra cha
 | muse-spark-1.2-contributor | $0.10 | $0.002 | $0.20 |
 | muse-spark-1.1 | $1.25 | $0.15 | $4.25 |
 
-When the CLI catalog is available, its model list is used, plus the supported Spark contributor aliases. A fallback list can appear while discovery is unavailable. A price or fallback entry does not establish access to that model.
+When the CLI catalog is available, its model list is used, plus the supported Wonder/Spark contributor aliases. A fallback list can appear while discovery is unavailable. A price or fallback entry does not establish access to that model.
 
 The CLI's current catalog returns `cost: null` for the tested account. The plugin supplies the dated public reference snapshot to Magpie's native pricing engine. If a future CLI supplies a USD catalog price it is preferred, unless an explicit per-model `pricing` override is configured.
 
@@ -28,6 +28,7 @@ The API's prompt token total includes cache reads and writes. Magpie stores unca
 ## Unpriced and tiered models
 
 - **Muse Wonder Full 1.0:** Meta lists it as subscription-only, with no public per-token API price. The plugin supplies no invented price.
+- **Muse Wonder 1.0 Contributor:** no rate is included in the bundled snapshot. Its token counters work independently of prices; it does not inherit ordinary Wonder's reference rate. An explicit USD CLI catalog price or user override can supply a rate.
 - **Muse Ember 1.0:** Meta publishes different rates below/above 200k context: input $0.10/$0.30, cache $0.004/$0.012, output $0.50/$1.50 per million tokens. Magpie's provider-plugin cost field accepts a flat price, not these context tiers, so the plugin deliberately leaves Ember unpriced by default. Use a native Magpie tiered-price setting if available, or an explicit flat override for a known workload; the latter is an approximation.
 - Unknown models remain unpriced when neither the CLI nor an explicit override supplies a rate. An unavailable estimate must not be interpreted as free inference or free plan quota.
 

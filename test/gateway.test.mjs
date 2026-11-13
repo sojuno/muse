@@ -19,7 +19,7 @@ test("actual Magpie/Bun gateway converts Chat, Responses and Anthropic tool loop
     assert.equal(r.status, 0, r.stderr + r.stdout)
   }
   run(["plugin", "add", project])
-  run(["plugin", "options", project, JSON.stringify({ workspace: root, museBin: process.execPath, museArgs: [fileURLToPath(new URL("./fixtures/fake-cli.mjs", import.meta.url))] })])
+  run(["plugin", "options", project, JSON.stringify({ workspace: root, museBin: process.execPath, museArgs: [fileURLToPath(new URL("./fixtures/fake-cli.mjs", import.meta.url))], museEnv: { FAKE_MODELS: '["muse-spark-1.3","muse-wonder-1.0"]' } })])
   run(["plugin", "login", "muse-cli"])
   const probe = net.createServer(); await new Promise(resolve => probe.listen(0, "127.0.0.1", resolve))
   const port = probe.address().port; await new Promise(resolve => probe.close(resolve))
@@ -100,8 +100,8 @@ test("actual Magpie/Bun gateway converts Chat, Responses and Anthropic tool loop
     assert.ok(rows.some(r => r.model.endsWith("-contributor")))
   })
   await t.test("token splits reach Chat, Responses, Messages and Magpie's own ledger in both lanes", async () => {
-    for (const suffix of ["", "-contributor"]) {
-      const selected = model + suffix
+    for (const selected of [model, model + "-contributor", "muse-cli/muse-wonder-1.0-contributor"]) {
+      const suffix = selected.replaceAll("/", "-")
       const chat = await post("/v1/chat/completions", { model: selected, messages: [{ role: "user", content: "TOKEN_SPLITS" }] }, "tokens-chat" + suffix)
       assert.deepEqual(chat.usage, { prompt_tokens: 19, completion_tokens: 4, total_tokens: 23,
         prompt_tokens_details: { cached_tokens: 6, cache_write_tokens: 3 }, completion_tokens_details: { reasoning_tokens: 2 } })
@@ -119,12 +119,44 @@ test("actual Magpie/Bun gateway converts Chat, Responses and Anthropic tool loop
     }
     const page = await (await fetch(base + "/v1/magpie/usage/requests?period=all&provider=muse-cli")).json()
     const rows = page.rows.filter(row => row.cache_write === 3)
-    assert.equal(rows.length, 6)
+    assert.equal(rows.length, 9)
     for (const row of rows) {
       assert.equal(row.in, 10)
       assert.equal(row.out, 4)
       assert.equal(row.cache_read, 6)
       assert.equal(row.reasoning, 2)
     }
+  })
+  await t.test("Wonder contributor streams reasoning and complete cache usage across an MCP tool step", async () => {
+    const model = "muse-cli/muse-wonder-1.0-contributor"
+    const messages = [{ role: "user", content: "CALL_TOOL REASON TOKEN_SPLITS" }]
+    const tools = [{ type: "function", function: { name, parameters: schema } }]
+    const send = async () => {
+      const res = await fetch(base + "/v1/chat/completions", { method: "POST", headers: { "content-type": "application/json", "x-magpie-session": "wonder-contributor-stream" }, body: JSON.stringify({ model, messages, tools, stream: true, reasoning_effort: "low" }), signal: AbortSignal.timeout(20000) })
+      assert.equal(res.status, 200)
+      let content = "", reasoning = "", usage, calls = []
+      for (const line of (await res.text()).split("\n")) {
+        if (!line.startsWith("data: ") || line === "data: [DONE]") continue
+        const chunk = JSON.parse(line.slice(6))
+        assert.equal(chunk.error, undefined)
+        usage = chunk.usage ?? usage
+        for (const choice of chunk.choices ?? []) {
+          content += choice.delta.content ?? ""
+          reasoning += choice.delta.reasoning_content ?? choice.delta.reasoning ?? ""
+          calls.push(...(choice.delta.tool_calls ?? []).map(({ index, ...call }) => call))
+        }
+      }
+      assert.deepEqual(usage, { prompt_tokens: 19, completion_tokens: 4, total_tokens: 23,
+        prompt_tokens_details: { cached_tokens: 6, cache_write_tokens: 3 }, completion_tokens_details: { reasoning_tokens: 2 } })
+      return { content, reasoning, calls }
+    }
+    const first = await send()
+    assert.equal(first.calls.length, 1)
+    assert.equal(first.calls[0].function.name, name)
+    messages.push({ role: "assistant", content: first.content, tool_calls: first.calls }, { role: "tool", tool_call_id: first.calls[0].id, content: "WONDER_MCP_OK" })
+    const last = await send()
+    assert.equal(last.content, "WONDER_MCP_OK")
+    assert.equal(last.reasoning, "Thinking carefully.")
+    assert.equal(last.calls.length, 0)
   })
 })

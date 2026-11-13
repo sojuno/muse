@@ -51,7 +51,7 @@ export class MuseHost {
     try {
       const spawned = await Promise.race([
         handshake.initialize({
-          clientInfo: { name: "magpie_muse_cli", title: "Magpie Muse CLI bridge", version: "0.3.2" },
+          clientInfo: { name: "magpie_muse_cli", title: "Magpie Muse CLI bridge", version: "0.3.3" },
           capabilities: { requestedCapabilities: ["sessionMcp"], userInputDialogs: false },
         }),
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Muse CLI handshake timed out")), 20000) }),

@@ -9,8 +9,8 @@ import { MuseBridge } from "../src/bridge.mjs"
 
 // This test uses the unmodified official Linux CLI, with a deterministic API on
 // loopback. No Meta login, real credential or subscription quota is involved.
-for (const [stream, contributorMode] of [[false, false], [true, false], [true, true]]) test(`official Muse CLI: MCP tools cross client HTTP turns (stream=${stream}, contributor=${contributorMode})`, { skip: !process.env.MUSE_TEST_BIN, timeout: 30000 }, async t => {
-  const model = `muse-spark-1.3${contributorMode ? "-contributor" : ""}`
+for (const [stream, contributorMode, baseModel] of [[false, false, "muse-spark-1.3"], [true, false, "muse-spark-1.3"], [true, true, "muse-spark-1.3"], [true, true, "muse-wonder-1.0"]]) test(`official Muse CLI: MCP tools cross client HTTP turns (model=${baseModel}, stream=${stream}, contributor=${contributorMode})`, { skip: !process.env.MUSE_TEST_BIN, timeout: 30000 }, async t => {
+  const model = `${baseModel}${contributorMode ? "-contributor" : ""}`
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "muse-real-cli-test-"))
   const museEnv = { XDG_CONFIG_HOME: path.join(directory, "config"), XDG_DATA_HOME: path.join(directory, "data"), XDG_CACHE_HOME: path.join(directory, "cache"), META_API_KEY: "test-only-local-backend" }
   const auth = spawnSync(process.env.MUSE_TEST_BIN, ["auth", "set", "--provider", "meta", "--api-key-stdin"], { input: "test-only-local-backend\n", env: { ...process.env, ...museEnv }, encoding: "utf8" })
@@ -20,7 +20,7 @@ for (const [stream, contributorMode] of [[false, false], [true, false], [true, t
     const chunks = []; for await (const c of req) chunks.push(c)
     if (req.method === "GET") {
       res.setHeader("content-type", "application/json")
-      return res.end(JSON.stringify({ object: "list", data: [{ id: "muse-spark-1.3", object: "model", owned_by: "meta", metadata: { "muse-code": { name: "Muse Spark", family: "muse", is_hidden: false, attachment: true, reasoning: true, temperature: false, tool_call: true, modalities: { input: ["text", "image"], output: ["text"] }, limit: { context: 1048576, output: 65536 }, options: { include: [] }, variants: {} } } }] }))
+      return res.end(JSON.stringify({ object: "list", data: [{ id: baseModel, object: "model", owned_by: "meta", metadata: { "muse-code": { name: "Muse test model", family: "muse", is_hidden: false, attachment: true, reasoning: true, temperature: false, tool_call: true, modalities: { input: ["text", "image"], output: ["text"] }, limit: { context: 1048576, output: 65536 }, options: { include: [] }, variants: {} } } }] }))
     }
     const body = JSON.parse(Buffer.concat(chunks).toString())
     const group = (body.tools ?? []).find(t => t.name === "mcp__magpie_client")
@@ -29,7 +29,7 @@ for (const [stream, contributorMode] of [[false, false], [true, false], [true, t
     if (group) {
       primary.push(body); outputs.push(...results)
       if (!results.length) output = group.tools.map((tool, i) => ({ type: "function_call", id: `fc_client_${i}`, call_id: `call_client_${i}`, name: `${group.name}.${tool.name}`, arguments: '{"path":"example.txt"}', status: "completed" }))
-      else output = [{ type: "message", id: "msg_final", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Verified client tool output.", annotations: [] }] }]
+      else output = [{ type: "reasoning", id: "rs_final", summary: [{ type: "summary_text", text: "Checked the tool result." }] }, { type: "message", id: "msg_final", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Verified client tool output.", annotations: [] }] }]
     } else {
       internal.push(body)
       // The CLI may ask its own reminder child to submit a bookkeeping decision.
@@ -50,18 +50,18 @@ for (const [stream, contributorMode] of [[false, false], [true, false], [true, t
   })
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve))
   const bridge = new MuseBridge({ workspace: directory, museBin: process.env.MUSE_TEST_BIN, museEnv, contributorMode,
-    serveArgs: ["--model", "muse-spark-1.3", "-c", `endpoint_transport=${JSON.stringify({ base_url: `http://127.0.0.1:${server.address().port}/v1`, auth: "none" })}`],
+    serveArgs: ["--model", baseModel, "-c", `endpoint_transport=${JSON.stringify({ base_url: `http://127.0.0.1:${server.address().port}/v1`, auth: "none" })}`],
     turnTimeoutMs: 15000,
   })
   t.after(async () => { await bridge.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); fs.rmSync(directory, { recursive: true, force: true }) })
   bridge.host.subscribe(n => { if (n.method === "approval/resolved") approvals.push(n.params) })
   const tools = ["fs/read.file", ...(stream ? ["mcp__filesystem__read_file"] : [])].map(name => ({ type: "function", function: { name, description: "Client file tool", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } }))
   const messages = [{ role: "user", content: "Use the client file tool to read example.txt." }]
-  const chat = () => bridge.fetch("http://muse-cli.invalid/v1/chat/completions", { method: "POST", headers: { "x-magpie-session": "real-cli" }, body: JSON.stringify({ model, messages, tools, stream }) })
+  const chat = () => bridge.fetch("http://muse-cli.invalid/v1/chat/completions", { method: "POST", headers: { "x-magpie-session": "real-cli" }, body: JSON.stringify({ model, messages, tools, stream, reasoning_effort: "low" }) })
   const usages = []
   const read = async res => {
     if (!stream || !res.ok) return res.json()
-    const message = { role: "assistant", content: "" }, calls = []
+    const message = { role: "assistant", content: "", reasoning_content: "" }, calls = []
     let finish_reason, usage
     for (const line of (await res.text()).split("\n")) {
       if (!line.startsWith("data: ") || line === "data: [DONE]") continue
@@ -69,6 +69,7 @@ for (const [stream, contributorMode] of [[false, false], [true, false], [true, t
       usage = chunk.usage ?? usage
       for (const choice of chunk.choices ?? []) {
         message.content += choice.delta.content ?? ""
+        message.reasoning_content += choice.delta.reasoning_content ?? ""
         calls.push(...(choice.delta.tool_calls ?? []).map(({ index, ...call }) => call))
         finish_reason = choice.finish_reason ?? finish_reason
       }
@@ -95,6 +96,7 @@ for (const [stream, contributorMode] of [[false, false], [true, false], [true, t
   }
   assert.deepEqual(called.sort(), tools.map(t => t.function.name).sort())
   assert.equal(last.choices?.[0]?.message.content, "Verified client tool output.", JSON.stringify(last))
+  assert.equal(last.choices?.[0]?.message.reasoning_content, "Checked the tool result.", "Real CLI reasoning summaries must reach the client without duplication")
   assert.ok(outputs.some(o => JSON.stringify(o).includes("ONLY_THE_CLIENT_PRODUCES_THIS_RESULT")))
   assert.equal(bridge.sessions.size, 1)
   assert.ok(primary.length >= 2)
@@ -106,6 +108,7 @@ for (const [stream, contributorMode] of [[false, false], [true, false], [true, t
   assert.equal(sum(u => u.prompt_tokens_details.cache_write_tokens), 0)
   assert.equal(sum(u => u.completion_tokens_details.reasoning_tokens), primary.length)
   assert.ok(primary.every(p => p.model === model), "The actual CLI wire request must retain the selected model, including its contributor suffix")
+  assert.ok(primary.every(p => p.reasoning?.effort === "low"), "The selected reasoning effort must reach the real CLI model request")
   assert.ok(primary.every(p => p.tools.every(group => group.name === "mcp__magpie_client")), "Main agent must be offered client tools only")
   assert.equal(internal.length, 0, "Reminder observers must not generate hidden model requests")
   assert.ok(approvals.some(a => a.decision === "approved"))

@@ -7,10 +7,13 @@ const FALLBACK = ["muse-wonder-1.0", "muse-wonder-full-1.0", "muse-spark-1.3", "
 // model/list returns the base names even in contributor mode. Publish aliases
 // for known contributor families present in the account's base catalog, and
 // keep their suffix on the model id actually selected in the CLI.
-const CONTRIBUTOR = new Set(["muse-spark-1.3", "muse-spark-1.2"])
-const withContributors = models => models.flatMap(m => CONTRIBUTOR.has(m.id)
-  ? [m, { ...m, id: `${m.id}-contributor`, name: `${m.name ?? m.id} (Contributor)`, cost: null }]
-  : [m])
+const CONTRIBUTOR = new Set(["muse-wonder-1.0", "muse-spark-1.3", "muse-spark-1.2"])
+const withContributors = models => {
+  const present = new Set(models.map(m => m.id))
+  return models.flatMap(m => CONTRIBUTOR.has(m.id) && !present.has(`${m.id}-contributor`)
+    ? [m, { ...m, id: `${m.id}-contributor`, name: `${m.name ?? m.id} (Contributor)`, cost: null }]
+    : [m])
+}
 
 // Magpie loads only this entry. The legacy OAuth implementation is not loaded
 // and this plugin never reads, redeems, copies or persists a Meta credential.

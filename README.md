@@ -31,7 +31,7 @@ The local Magpie login links the CLI installation; it does not perform Meta OAut
 
 Pick a model such as `muse-cli/muse-spark-1.3` or `muse-cli/muse-wonder-1.0` in Magpie. Disable the old `magpie-muse-auth` plugin if you no longer want the direct-OAuth provider. The provider ids are different, so installing this plugin does not silently change an agent's selected model.
 
-Contributor variants are exposed as `muse-cli/muse-spark-1.3-contributor` and `muse-cli/muse-spark-1.2-contributor` when the corresponding base model is in the account's CLI catalog. The CLI catalog itself keeps the base names. The plugin preserves the suffix on the actual model selection and uses separate CLI processes with contributor mode explicitly `on` or `off`, so choosing a contributor model does not change ordinary conversations. Meta states contributor models may use submitted data to improve its products; the choice is explicit in the model picker.
+Contributor variants are exposed as `muse-cli/muse-wonder-1.0-contributor`, `muse-cli/muse-spark-1.3-contributor` and `muse-cli/muse-spark-1.2-contributor` when the corresponding base model is in the account's CLI catalog. The CLI catalog itself can keep only the base names; an explicit contributor catalog row takes precedence over a generated alias. The plugin preserves the suffix on the actual model selection and uses separate CLI processes with contributor mode explicitly `on` or `off`, so choosing a contributor model does not change ordinary conversations. Wonder 1.0 Contributor and Spark 1.3 Contributor have passed live tests on Muse 1.4.18. Meta states contributor models may use submitted data to improve its products; the choice is explicit in the model picker.
 
 If Muse is outside Magpie's PATH, set its absolute path in the installed plugin's Options:
 
@@ -128,6 +128,7 @@ Set `referencePricing: false` to disable the bundled public-price snapshot, or s
 ## Behavior and current limits
 
 - Supports Chat Completions streaming/non-streaming, reasoning text, usage counts, inline images, function tools, parallel tool results, cancellation and named reasoning effort.
+- Reasoning effort and token counts are forwarded. Reasoning summary text is forwarded when the CLI emits it; a model can report reasoning tokens without exposing reasoning text. The bridge does not reconstruct hidden reasoning.
 - Immediate CLI authentication/quota failures retain HTTP 401/429, including for streaming requests before output starts. Failures after output starts are reported in the SSE stream.
 - Keeps the same Muse session across client tool steps and subsequent messages. Session identity includes conversation, subagent and project. Changed history, model, system instructions or tool definitions starts a new session seeded from the supplied history.
 - Equivalent tool schemas with different JSON key ordering, or a reordered tool list, preserve the session. Duplicate names and invalid schema containers fail before a turn starts.
@@ -159,9 +160,9 @@ MUSE_TEST_BIN=/absolute/path/to/muse npm test
 MUSE_TEST_BIN=/absolute/path/to/muse MAGPIE_TEST_BIN=/absolute/path/to/magpie npm test
 ```
 
-The default suite runs the inherited 48 legacy regression tests, pricing tests and CLI bridge tests. The three official-CLI tests are explicitly skipped when `MUSE_TEST_BIN` is unset; the Magpie gateway group is skipped without `MAGPIE_TEST_BIN`. Official-CLI regression tests use a dummy credential in a separate temporary configuration and route requests only to a loopback test backend. The gateway group enables subscription discovery in its isolated Magpie configuration because that is required for CLI-backed provider plugins; run it on a development/test machine. `MAGPIE_TEST_BUN` can point to an existing supported Bun executable.
+The default suite runs the inherited 48 legacy regression tests, pricing tests and CLI bridge tests. The official-CLI tests are explicitly skipped when `MUSE_TEST_BIN` is unset; the Magpie gateway group is skipped without `MAGPIE_TEST_BIN`. Official-CLI regression tests use a dummy credential in a separate temporary configuration and route requests only to a loopback test backend. They verify native model selection, reasoning summaries/effort, token counts and MCP continuation, including Wonder Contributor. The gateway group enables subscription discovery in its isolated Magpie configuration because that is required for CLI-backed provider plugins; run it on a development/test machine. `MAGPIE_TEST_BUN` can point to an existing supported Bun executable.
 
-Validated in development: Node 24.22.1, Muse Code 1.4.15-R8339.1 and 1.4.18-R8587.1, Magpie 0.1.3903, Linux x64. Official CLI artifact sizes/SHA-256 and the Magpie release checksum were verified before execution. Separate live-account tests cover Spark 1.3, Spark 1.3 Contributor and Wonder 1.0; see [TESTING.md](TESTING.md) for the exact runs and scope. Live tests are opt-in and are not part of `npm test`.
+Validated in development: Node 24.22.1, Muse Code 1.4.15-R8339.1 and 1.4.18-R8587.1, Magpie 0.1.3903, Linux x64. Official CLI artifact sizes/SHA-256 and the Magpie release checksum were verified before execution. Separate live-account tests cover Spark 1.3, Spark 1.3 Contributor, Wonder 1.0 and Wonder 1.0 Contributor; see [TESTING.md](TESTING.md) for the exact runs and scope. Live tests are opt-in and are not part of `npm test`.
 
 The SDK transport, authentication boundaries and implementation tradeoffs of another community bridge were reviewed before adopting selected compatibility and robustness ideas; see [UPSTREAM-REVIEW.md](UPSTREAM-REVIEW.md).
 

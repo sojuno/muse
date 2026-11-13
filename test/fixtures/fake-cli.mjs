@@ -80,7 +80,7 @@ lines.on("line", async line => {
       schema: { version: Number(process.env.FAKE_SCHEMA_VERSION ?? 1), fingerprint: process.env.FAKE_FINGERPRINT ?? EXPECTED_SCHEMA_FINGERPRINT },
       serverInfo: { name: "test-muse", version: process.env.FAKE_CLI_VERSION ?? "1.4.15" }, sessionDurability: "durable", museHome: "/tmp/fake-muse", platformFamily: "unix", platformOs: "linux",
     })
-    if (method === "model/list") return result({ models: [{ modelId: "muse-spark-1.3", displayLabel: "Muse Spark", contextLimit: 1048576, outputLimit: 65536, variants: ["low", "high"] }] })
+    if (method === "model/list") return result({ models: (JSON.parse(process.env.FAKE_MODELS ?? '["muse-spark-1.3"]')).map(row => ({ contextLimit: 1048576, outputLimit: 65536, variants: ["low", "high"], ...(typeof row === "string" ? { modelId: row, displayLabel: row } : row) })) })
     if (method === "session/start") {
       const sessionId = randomUUID(), url = params.config.mcpServers.magpie_client.url
       await rpc(url, "initialize", { protocolVersion: "2025-03-26" })
