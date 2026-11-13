@@ -200,7 +200,11 @@ class Session {
         this.events.push({ type, text: p.delta })
       }
     }
-    if (n.method === "turn/completed") this.finish({ usage: p.usage ?? this.usage, error: p.error ? (p.error.kind === "authRequired" ? "Muse is not signed in. Run muse login in a terminal." : p.error.message) : p.terminal === "failed" ? (p.reason ?? "Muse turn failed") : undefined })
+    if (n.method === "turn/completed") this.finish({
+      usage: p.usage ?? this.usage,
+      status: p.error?.kind === "authRequired" ? 401 : p.error && (p.error.quota != null || /quota|rate.?limit/i.test(p.error.kind ?? "")) ? 429 : 502,
+      error: p.error ? (p.error.kind === "authRequired" ? "Muse is not signed in. Run muse login in a terminal." : p.error.message ?? "Muse turn failed") : p.terminal === "failed" ? (p.reason ?? "Muse turn failed") : undefined,
+    })
   }
   full(id, field, full, type) {
     if (!full) return
@@ -224,7 +228,7 @@ class Session {
   cancel(message = "Request cancelled") {
     this.cancelled = true
     const cancelling = this.active && this.turnId ? this.bridge.host.command("turn/cancel", { sessionId: this.id, turnId: this.turnId }).catch(() => {}) : Promise.resolve()
-    this.finish({ error: message })
+    this.finish({ error: message, status: 499 })
     return cancelling
   }
   async close() {
@@ -332,11 +336,19 @@ export class MuseBridge {
       if (event.type === "done" && !event.error) session.completedHistory = [...body.messages, { role: "assistant", content }]
       return event
     }
+    // Preserve immediate authentication/quota failures as HTTP statuses instead
+    // of committing HTTP 200 before the CLI has produced any output.
+    let first
+    try {
+      first = await next()
+      if (first.type === "done" && first.error) { release(); return errorResponse(first.status ?? 502, first.error) }
+    } catch (e) { release(); throw e }
+    const take = async () => { if (first) { const e = first; first = null; return e } return next() }
     if (!body.stream) {
       try {
         while (true) {
-          const e = await next()
-          if (e.type === "done" && e.error) return errorResponse(/not signed in/.test(e.error) ? 401 : 502, e.error)
+          const e = await take()
+          if (e.type === "done" && e.error) return errorResponse(e.status ?? 502, e.error)
           if (e.type === "tools" || e.type === "done") return Response.json({ id, object: "chat.completion", created, model: body.model, choices: [{ index: 0, message: { role: "assistant", content, ...(reasoning ? { reasoning_content: reasoning } : {}), ...(calls.length ? { tool_calls: calls.map(({ index, ...c }) => c) } : {}) }, finish_reason: calls.length ? "tool_calls" : "stop" }], usage: usageOf(e.usage) })
         }
       } finally { release() }
@@ -349,7 +361,7 @@ export class MuseBridge {
         try {
           emit(chunk({ role: "assistant", content: "" }))
           while (!signal.aborted) {
-            const e = await next()
+            const e = await take()
             if (e.type === "text") emit(chunk({ content: e.text }))
             if (e.type === "reasoning") emit(chunk({ reasoning_content: e.text }))
             if (e.type === "tools") { emit(chunk({ tool_calls: calls })); emit(chunk({}, "tool_calls")); break }

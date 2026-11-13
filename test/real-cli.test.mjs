@@ -9,7 +9,7 @@ import { MuseBridge } from "../src/bridge.mjs"
 
 // This test uses the unmodified official Linux CLI, with a deterministic API on
 // loopback. No Meta login, real credential or subscription quota is involved.
-test("official Muse 1.4.15: MCP call crosses client HTTP turns and resumes", { skip: !process.env.MUSE_TEST_BIN, timeout: 30000 }, async t => {
+for (const stream of [false, true]) test(`official Muse 1.4.15: MCP tools cross client HTTP turns (stream=${stream})`, { skip: !process.env.MUSE_TEST_BIN, timeout: 30000 }, async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "muse-real-cli-test-"))
   const museEnv = { XDG_CONFIG_HOME: path.join(directory, "config"), XDG_DATA_HOME: path.join(directory, "data"), XDG_CACHE_HOME: path.join(directory, "cache"), META_API_KEY: "test-only-local-backend" }
   const auth = spawnSync(process.env.MUSE_TEST_BIN, ["auth", "set", "--provider", "meta", "--api-key-stdin"], { input: "test-only-local-backend\n", env: { ...process.env, ...museEnv }, encoding: "utf8" })
@@ -27,7 +27,7 @@ test("official Muse 1.4.15: MCP call crosses client HTTP turns and resumes", { s
     let output
     if (group) {
       primary.push(body); outputs.push(...results)
-      if (!results.length) output = [{ type: "function_call", id: "fc_client", call_id: "call_client", name: `${group.name}.${group.tools[0].name}`, arguments: '{"path":"example.txt"}', status: "completed" }]
+      if (!results.length) output = group.tools.map((tool, i) => ({ type: "function_call", id: `fc_client_${i}`, call_id: `call_client_${i}`, name: `${group.name}.${tool.name}`, arguments: '{"path":"example.txt"}', status: "completed" }))
       else output = [{ type: "message", id: "msg_final", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Verified client tool output.", annotations: [] }] }]
     } else {
       // The CLI may ask its own reminder child to submit a bookkeeping decision.
@@ -53,16 +53,42 @@ test("official Muse 1.4.15: MCP call crosses client HTTP turns and resumes", { s
   })
   t.after(async () => { await bridge.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); fs.rmSync(directory, { recursive: true, force: true }) })
   bridge.host.subscribe(n => { if (n.method === "approval/resolved") approvals.push(n.params) })
-  const tools = [{ type: "function", function: { name: "fs/read.file", description: "Client file tool", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } }]
+  const tools = ["fs/read.file", ...(stream ? ["mcp__filesystem__read_file"] : [])].map(name => ({ type: "function", function: { name, description: "Client file tool", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } }))
   const messages = [{ role: "user", content: "Use the client file tool to read example.txt." }]
-  const chat = () => bridge.fetch("http://muse-cli.invalid/v1/chat/completions", { method: "POST", headers: { "x-magpie-session": "real-cli" }, body: JSON.stringify({ model: "muse-spark-1.3", messages, tools }) })
-  const first = await (await chat()).json()
-  assert.equal(first.choices?.[0]?.finish_reason, "tool_calls", JSON.stringify(first))
-  const call = first.choices[0].message.tool_calls[0]
-  assert.equal(call.function.name, "fs/read.file")
-  assert.deepEqual(JSON.parse(call.function.arguments), { path: "example.txt" })
-  messages.push(first.choices[0].message, { role: "tool", tool_call_id: call.id, content: "ONLY_THE_CLIENT_PRODUCES_THIS_RESULT" })
-  const last = await (await chat()).json()
+  const chat = () => bridge.fetch("http://muse-cli.invalid/v1/chat/completions", { method: "POST", headers: { "x-magpie-session": "real-cli" }, body: JSON.stringify({ model: "muse-spark-1.3", messages, tools, stream }) })
+  const read = async res => {
+    if (!stream || !res.ok) return res.json()
+    const message = { role: "assistant", content: "" }, calls = []
+    let finish_reason
+    for (const line of (await res.text()).split("\n")) {
+      if (!line.startsWith("data: ") || line === "data: [DONE]") continue
+      const chunk = JSON.parse(line.slice(6)); assert.equal(chunk.error, undefined, JSON.stringify(chunk))
+      for (const choice of chunk.choices ?? []) {
+        message.content += choice.delta.content ?? ""
+        calls.push(...(choice.delta.tool_calls ?? []).map(({ index, ...call }) => call))
+        finish_reason = choice.finish_reason ?? finish_reason
+      }
+    }
+    if (calls.length) message.tool_calls = calls
+    return { choices: [{ message, finish_reason }] }
+  }
+  let last, called = []
+  for (let step = 0; step < 4; step++) {
+    last = await read(await chat())
+    const choice = last.choices?.[0]
+    assert.ok(choice, JSON.stringify(last))
+    if (choice.finish_reason !== "tool_calls") break
+    const calls = choice.message.tool_calls
+    assert.ok(calls.length)
+    messages.push(choice.message)
+    for (const call of calls) {
+      assert.ok(tools.some(t => t.function.name === call.function.name))
+      assert.deepEqual(JSON.parse(call.function.arguments), { path: "example.txt" })
+      called.push(call.function.name)
+      messages.push({ role: "tool", tool_call_id: call.id, content: "ONLY_THE_CLIENT_PRODUCES_THIS_RESULT" })
+    }
+  }
+  assert.deepEqual(called.sort(), tools.map(t => t.function.name).sort())
   assert.equal(last.choices?.[0]?.message.content, "Verified client tool output.", JSON.stringify(last))
   assert.ok(outputs.some(o => JSON.stringify(o).includes("ONLY_THE_CLIENT_PRODUCES_THIS_RESULT")))
   assert.equal(bridge.sessions.size, 1)

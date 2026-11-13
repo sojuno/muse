@@ -74,12 +74,14 @@ Do not point Muse's `endpoint_transport` back at the same Magpie provider: that 
 ## Behavior and current limits
 
 - Supports Chat Completions streaming/non-streaming, reasoning text, usage counts, inline images, function tools, parallel tool results, cancellation and named reasoning effort.
+- Immediate CLI authentication/quota failures retain HTTP 401/429, including for streaming requests before output starts. Failures after output starts are reported in the SSE stream.
 - Keeps the same Muse session across client tool steps and subsequent messages. Session identity includes conversation, subagent and project. Changed history, model, system instructions or tool definitions starts a new session seeded from the supplied history.
 - After a plugin/CLI restart, conversation history can seed a new session. A lost pending tool step is rejected explicitly; retry from the user turn. There is no cross-process restoration of a tool call waiting for its result.
 - Return all tool results from one response together, using their original ids and tool definitions. New turns are rejected while previous tools are pending.
 - `tool_choice: "none"` prevents bridge tool execution. Named choices expose only that tool. Required/named choices are also communicated to Muse in the prompt; this is not a native model-level tool-choice guarantee.
 - The CLI has its own system/runtime instructions. Client system/developer messages are included in the initial conversation seed, not installed as an exact replacement for the CLI's system prompt. This is not full behavioral parity with every Claude bridge feature.
 - Structured `response_format`, audio/prediction and remote image URLs are rejected rather than silently ignored. No arbitrary external image fetches occur.
+- MCP **tools** from a client, including tools backed by its own stdio MCP servers, cross the bridge. MCP resources, prompts, server installation and server OAuth are not provided by this plugin; those remain the client's responsibility.
 - One local CLI account per plugin. Subscription allowance cards and multiple isolated Muse accounts are not implemented. Zero per-token prices in the model metadata do not imply free plan quota.
 - Magpie is the supported host. OpenCode 2's native plugin interface is not implemented by this entry point.
 
@@ -96,9 +98,12 @@ MUSE_CLI_BIN=/absolute/path/to/muse npm run doctor -- --live
 
 # Include the full official-CLI MCP regression against a local test backend:
 MUSE_TEST_BIN=/absolute/path/to/muse npm test
+
+# Also include the actual Magpie/Bun gateway protocol tests:
+MUSE_TEST_BIN=/absolute/path/to/muse MAGPIE_TEST_BIN=/absolute/path/to/magpie npm test
 ```
 
-The default suite runs the inherited 48 legacy regression tests and the new CLI bridge tests. The official-CLI test is explicitly skipped when `MUSE_TEST_BIN` is unset. It uses a dummy credential in a separate temporary configuration and routes requests only to a loopback test backend. It does not test a real Meta account.
+The default suite runs the inherited 48 legacy regression tests and the CLI bridge tests. The two official-CLI tests are explicitly skipped when `MUSE_TEST_BIN` is unset; the Magpie gateway group is skipped without `MAGPIE_TEST_BIN`. Official-CLI tests use a dummy credential in a separate temporary configuration and route requests only to a loopback test backend. They do not test a real Meta account. The gateway group enables subscription discovery in its isolated Magpie configuration because that is required for CLI-backed provider plugins; run it on a development/test machine. `MAGPIE_TEST_BUN` can point to an existing supported Bun executable.
 
 Validated in development: Node 24.22.1, Muse Code 1.4.15-R8339.1, Magpie 0.1.3903, Linux x64. Real CLI artifact size/SHA-256 and the Magpie release checksum were verified before execution. Live Meta subscription inference has not been validated in this environment.
 

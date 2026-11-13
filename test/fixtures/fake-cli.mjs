@@ -16,23 +16,37 @@ const rpc = async (url, method, params = {}) => {
 async function turn(sessionId, turnId, input) {
   const s = sessions.get(sessionId), state = { cancelled: false }
   running.set(turnId, state)
-  const user = input.at(-1)?.text ?? ""
+  const user = input.findLast(p => p.type === "text")?.text ?? ""
   try {
     if (user.includes("CRASH")) process.exit(7)
     if (user.includes("AUTH_REQUIRED")) {
       notify("turn/completed", { sessionId, turnId, terminal: "failed", error: { kind: "authRequired", message: "test signed out" } }); return
     }
+    if (user.includes("RATE_LIMIT")) {
+      notify("turn/completed", { sessionId, turnId, terminal: "failed", error: { kind: "quotaExceeded", quota: {}, message: "Test subscription limit reached" } }); return
+    }
     if (user.includes("SLOW")) await new Promise(r => setTimeout(r, 1000))
     let answer = `Echo: ${user}`
     if (user.includes("CALL_TOOL") || user.includes("PARALLEL")) {
       const chosen = user.includes("PARALLEL") ? s.tools : s.tools.slice(0, 1)
-      const result = await Promise.all(chosen.map(t => rpc(s.url, "tools/call", { name: t.name, arguments: { path: "example.txt" } })))
-      answer = result.map(r => r.content.map(c => c.text).join("")).join(" | ")
+      const all = []
+      for (let step = 0; step < (user.includes("TWICE") ? 2 : 1); step++) {
+        const result = await Promise.all(chosen.map(t => rpc(s.url, "tools/call", { name: t.name, arguments: { path: "example.txt" } })))
+        log({ method: "test/tool-result", params: result })
+        all.push(...result)
+      }
+      answer = all.map(r => r.content.map(c => c.text).join("")).join(" | ")
     }
     if (state.cancelled) return
     const itemId = randomUUID()
+    if (user.includes("REASON")) {
+      const reasonId = randomUUID()
+      notify("item/started", { sessionId, item: { itemId: reasonId, turnId, kind: "reasoning", summary: [] } })
+      notify("item/delta", { sessionId, itemId: reasonId, field: "summary.0", delta: "Thinking " })
+      notify("item/completed", { sessionId, item: { itemId: reasonId, turnId, kind: "reasoning", summary: ["Thinking carefully."] } })
+    }
     notify("item/started", { sessionId, item: { itemId, turnId, kind: "agentMessage", text: "" } })
-    notify("item/delta", { sessionId, itemId, field: "text", delta: answer })
+    if (!user.includes("COMPLETE_ONLY")) notify("item/delta", { sessionId, itemId, field: "text", delta: answer })
     notify("item/completed", { sessionId, item: { itemId, turnId, kind: "agentMessage", text: answer } })
     notify("turn/completed", { sessionId, turnId, terminal: "completed", usage: { inputTokens: 12, outputTokens: 4, cachedTokens: 2 } })
   } catch (e) { notify("turn/completed", { sessionId, turnId, terminal: "failed", error: { message: e.message } }) }

@@ -1,5 +1,27 @@
 # Validation record
 
+## Expanded capability check — 2026-11-13
+
+Full run with `MUSE_TEST_BIN` and `MAGPIE_TEST_BIN`: **88 executed, 88 passed, 0 failed, 0 skipped**. This includes 48 legacy tests, 34 bridge tests, two official Muse CLI cases, and four actual Magpie gateway tests (parent plus three protocols).
+
+| Capability | Evidence | Scope |
+| --- | --- | --- |
+| Chat and conversation reuse | Scripted MSP subprocess; real CLI echo | No live Meta model |
+| Streaming and tool continuation | Official Muse 1.4.15, streaming/non-streaming | Backend on loopback |
+| Multiple tool calls | Two tool calls with official CLI; consecutive steps with scripted MSP | Client owns execution |
+| MCP tools | Actual CLI ↔ HTTP MCP bridge; independent stdio filesystem MCP reads a real temporary file | Tools only |
+| OpenAI Chat/Responses and Anthropic Messages | Real Magpie/Bun gateway, tools and returned results | Scripted MSP subprocess |
+| Reasoning, usage and effort | MSP event/command regression tests | No model reasoning-quality claim |
+| Inline images | Input payload reaches turn/start | Vision inference not tested |
+| Quota/auth failures | 429/401 before output, including streaming | Scripted CLI error events |
+| Unsupported features | Explicit tests for MCP resources/prompts, structured output, audio and remote images | Not implemented |
+
+The expanded run found and fixed a status-mapping defect: quota errors became 502, and streaming committed 200 before an immediate auth/quota error. These now preserve 429/401 until output begins. Errors after output begins remain SSE errors.
+
+The stdio filesystem MCP test is a separate client-side process performing a real file read. It does not establish compatibility with every third-party MCP server, server OAuth, resources or prompts. The protocol conversion tests demonstrate Chat, Responses and Messages transport behavior, not every Codex/Claude client feature. Live Meta account inference, quota accounting and full subscription/interactive parity remain unverified.
+
+## Initial validation — 2026-11-12
+
 Validated on Linux x64 on 2026-11-12 with Node 24.22.1, Muse Code 1.4.15-R8339.1, SDK 1.4.15 and Magpie 0.1.3903.
 
 - `MUSE_TEST_BIN=/absolute/path/to/muse npm test`: **66 executed, 66 passed, 0 failed, 0 skipped**. The default suite without that variable skips the official-CLI integration explicitly.

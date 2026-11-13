@@ -4,6 +4,8 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { spawn } from "node:child_process"
+import readline from "node:readline"
 import { MuseBridge } from "../src/bridge.mjs"
 import { MuseCLIPlugin } from "../plugin.mjs"
 
@@ -38,7 +40,7 @@ test("plugin registers muse-cli, links the CLI without saving Meta credentials",
   assert.ok(models["muse-spark-1.3"].capabilities.toolcall)
 })
 
-test("real MSP child completes a text turn and keeps the same session", async t => {
+test("scripted MSP child completes a text turn and keeps the same session", async t => {
   const { bridge, requests } = await setup(t)
   let messages = user("hello")
   let res = await chat(bridge, messages), body = await res.json()
@@ -113,9 +115,10 @@ test("restarts session after history edits, model change or tool schema change",
 test("cancellation reaches Muse and releases the stream", async t => {
   const { bridge, requests } = await setup(t)
   const abort = new AbortController()
-  const res = await chat(bridge, user("SLOW"), { stream: true }, {}, abort.signal)
-  const reader = res.body.getReader(); await reader.read()
-  abort.abort(); await reader.cancel()
+  const response = chat(bridge, user("SLOW"), { stream: true }, {}, abort.signal)
+  while (!requests().some(r => r.method === "turn/start")) await new Promise(r => setTimeout(r, 1))
+  abort.abort()
+  assert.equal((await response).status, 499)
   await new Promise(r => setTimeout(r, 20))
   assert.ok(requests().some(r => r.method === "turn/cancel"))
 })
@@ -172,4 +175,175 @@ test("CLI crash fails its turn and the next user turn starts a fresh CLI", async
   assert.equal((await chat(bridge, user("CRASH"))).status, 502)
   const res = await chat(bridge, user("recovered"))
   assert.equal((await res.json()).choices[0].message.content, "Echo: recovered")
+})
+
+test("two consecutive tool steps stay inside a single Muse turn", async t => {
+  const { bridge, requests } = await setup(t)
+  const messages = user("TWICE CALL_TOOL")
+  for (const output of ["STEP_ONE", "STEP_TWO"]) {
+    const body = await (await chat(bridge, messages, { tools })).json()
+    assert.equal(body.choices[0].finish_reason, "tool_calls")
+    const call = body.choices[0].message.tool_calls[0]
+    messages.push(body.choices[0].message, { role: "tool", tool_call_id: call.id, content: output })
+  }
+  const last = await (await chat(bridge, messages, { tools })).json()
+  assert.equal(last.choices[0].message.content, "STEP_ONE | STEP_TWO")
+  assert.equal(requests().filter(r => r.method === "turn/start").length, 1)
+})
+
+for (const stream of [false, true]) test(`reasoning deltas and completion fallback are preserved (stream=${stream})`, async t => {
+  const { bridge } = await setup(t)
+  const res = await chat(bridge, user("REASON COMPLETE_ONLY"), { stream, reasoning_effort: "high" })
+  if (stream) {
+    const out = await decode(res)
+    assert.equal(out.text, "Echo: REASON COMPLETE_ONLY")
+    assert.equal(out.chunks.flatMap(c => c.choices ?? []).map(c => c.delta.reasoning_content ?? "").join(""), "Thinking carefully.")
+  } else {
+    const body = await res.json()
+    assert.equal(body.choices[0].message.reasoning_content, "Thinking carefully.")
+    assert.equal(body.choices[0].message.content, "Echo: REASON COMPLETE_ONLY")
+  }
+})
+
+test("inline images and requested reasoning effort reach turn/start", async t => {
+  const { bridge, requests } = await setup(t)
+  const content = [{ type: "text", text: "describe image" }, { type: "image_url", image_url: { url: "data:image/png;base64,dGVzdA==" } }]
+  const res = await chat(bridge, [{ role: "user", content }], { reasoning_effort: "high" })
+  assert.equal(res.status, 200); await res.json()
+  const turn = requests().find(r => r.method === "turn/start").params
+  assert.equal(turn.reasoningEffort, "high")
+  assert.deepEqual(turn.input.find(p => p.type === "image"), { type: "image", mediaType: "image/png", base64Data: "dGVzdA==" })
+})
+
+test("named tool choice exposes only the selected tool, retaining its client name", async t => {
+  const { bridge } = await setup(t)
+  const two = [...tools, { type: "function", function: { name: "mcp__filesystem__read", parameters: { type: "object" } } }]
+  const body = await (await chat(bridge, user("CALL_TOOL"), { tools: two, tool_choice: { type: "function", function: { name: "mcp__filesystem__read" } } })).json()
+  assert.equal(body.choices[0].message.tool_calls[0].function.name, "mcp__filesystem__read")
+})
+
+test("a client tool error is returned to Muse as an MCP error result", async t => {
+  const { bridge, requests } = await setup(t)
+  const messages = user("CALL_TOOL")
+  const body = await (await chat(bridge, messages, { tools })).json()
+  messages.push(body.choices[0].message, { role: "tool", tool_call_id: body.choices[0].message.tool_calls[0].id, content: "Permission denied by client", is_error: true })
+  const result = await (await chat(bridge, messages, { tools })).json()
+  assert.equal(result.choices[0].message.content, "Permission denied by client")
+  assert.equal(requests().find(r => r.method === "test/tool-result").params[0].isError, true)
+})
+
+test("rejects a partial parallel result batch without consuming any result", async t => {
+  const { bridge } = await setup(t)
+  const two = [...tools, { type: "function", function: { name: "other", parameters: { type: "object" } } }]
+  const messages = user("PARALLEL")
+  const body = await (await chat(bridge, messages, { tools: two })).json()
+  const calls = body.choices[0].message.tool_calls
+  messages.push(body.choices[0].message, { role: "tool", tool_call_id: calls[0].id, content: "one" })
+  assert.equal((await chat(bridge, messages, { tools: two })).status, 400)
+  assert.equal([...bridge.sessions.values()][0].pending.size, 2)
+  messages.push({ role: "tool", tool_call_id: calls[1].id, content: "two" })
+  assert.equal((await (await chat(bridge, messages, { tools: two })).json()).choices[0].message.content, "one | two")
+})
+
+test("tool definitions cannot change during a pending call", async t => {
+  const { bridge } = await setup(t)
+  const messages = user("CALL_TOOL")
+  const body = await (await chat(bridge, messages, { tools })).json()
+  messages.push(body.choices[0].message, { role: "tool", tool_call_id: body.choices[0].message.tool_calls[0].id, content: "ok" })
+  assert.equal((await chat(bridge, messages, { tools: [] })).status, 409)
+})
+
+test("subagents are isolated even under the same conversation", async t => {
+  const { bridge, requests } = await setup(t)
+  await (await chat(bridge, user("one"), {}, { "x-magpie-subagent": "A" })).json()
+  await (await chat(bridge, user("two"), {}, { "x-magpie-subagent": "B" })).json()
+  assert.equal(requests().filter(r => r.method === "session/start").length, 2)
+})
+
+test("system instructions and edited history are included when a session is reseeded", async t => {
+  const { bridge, requests } = await setup(t)
+  const messages = [{ role: "system", content: "Use Vietnamese." }, ...user("first")]
+  const first = await (await chat(bridge, messages)).json()
+  messages.push(first.choices[0].message, { role: "user", content: "next" })
+  messages[0].content = "Use English."
+  await (await chat(bridge, messages)).json()
+  const turns = requests().filter(r => r.method === "turn/start")
+  assert.equal(requests().filter(r => r.method === "session/start").length, 2)
+  assert.match(JSON.stringify(turns.at(-1).params.input), /Use English/)
+  assert.match(JSON.stringify(turns.at(-1).params.input), /Echo: first/)
+})
+
+test("evicting an idle session releases it in the CLI", async t => {
+  const { bridge, requests } = await setup(t, { maxSessions: 1 })
+  await (await chat(bridge, user("one"), {}, { "x-magpie-session": "one" })).json()
+  await (await chat(bridge, user("two"), {}, { "x-magpie-session": "two" })).json()
+  assert.equal(bridge.sessions.size, 1)
+  assert.ok(requests().some(r => r.method === "session/leave"))
+})
+
+test("MCP resources/prompts are explicitly unsupported; cross-origin access is denied", async t => {
+  const { bridge } = await setup(t)
+  await (await chat(bridge, user("hi"), { tools })).json()
+  const route = [...bridge.server.routes.keys()][0], url = bridge.server.base + route
+  const rpc = (method, headers = {}) => fetch(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method }) })
+  assert.equal((await (await rpc("resources/list")).json()).error.code, -32601)
+  assert.equal((await (await rpc("prompts/list")).json()).error.code, -32601)
+  assert.equal((await rpc("tools/list", { origin: "https://example.com" })).status, 403)
+})
+
+test("unsupported structured output and audio fail explicitly", async t => {
+  const { bridge } = await setup(t)
+  for (const option of [{ response_format: { type: "json_object" } }, { audio: { voice: "alloy" } }]) {
+    assert.equal((await chat(bridge, user("hi"), option)).status, 400)
+  }
+})
+
+test("remote image URLs are rejected without sending a Muse turn", async t => {
+  const { bridge, requests } = await setup(t)
+  const res = await chat(bridge, [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://example.com/image.png" } }] }])
+  assert.ok(res.status >= 400)
+  assert.match((await res.json()).error.message, /remote image URLs/)
+  assert.equal(requests().filter(r => r.method === "turn/start").length, 0)
+})
+
+test("subscription quota errors keep their retryable HTTP status", async t => {
+  const { bridge } = await setup(t)
+  assert.equal((await chat(bridge, user("RATE_LIMIT"))).status, 429)
+})
+
+test("streaming requests retain an immediate auth/quota HTTP failure before any SSE bytes", async t => {
+  const { bridge } = await setup(t)
+  for (const [input, status] of [["AUTH_REQUIRED", 401], ["RATE_LIMIT", 429]]) {
+    const res = await chat(bridge, user(input), { stream: true })
+    assert.equal(res.status, status)
+    assert.match(res.headers.get("content-type"), /application\/json/)
+    assert.ok((await res.json()).error.message)
+  }
+})
+
+test("a separate stdio filesystem MCP server executes a bridged client tool", async t => {
+  const { bridge, options } = await setup(t)
+  const secret = `filesystem-content-${crypto.randomUUID()}`
+  fs.writeFileSync(path.join(options.workspace, "example.txt"), secret)
+  const child = spawn(process.execPath, [fileURLToPath(new URL("./fixtures/filesystem-mcp.mjs", import.meta.url)), options.workspace], { stdio: ["pipe", "pipe", "pipe"] })
+  const lines = readline.createInterface({ input: child.stdout }), pending = new Map()
+  let serial = 0
+  lines.on("line", line => { const msg = JSON.parse(line); pending.get(msg.id)?.(msg.result); pending.delete(msg.id) })
+  t.after(() => { child.stdin.end(); lines.close() })
+  const rpc = (method, params = {}) => new Promise(resolve => {
+    const id = ++serial; pending.set(id, resolve)
+    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n")
+  })
+  await rpc("initialize", { protocolVersion: "2025-03-26" })
+  const catalog = await rpc("tools/list"), tool = catalog.tools[0]
+  const clientTools = [{ type: "function", function: { name: `mcp__filesystem__${tool.name}`, description: tool.description, parameters: tool.inputSchema } }]
+  const messages = user("CALL_TOOL")
+  const first = await (await chat(bridge, messages, { tools: clientTools })).json()
+  const call = first.choices[0].message.tool_calls[0]
+  assert.equal(call.function.name, "mcp__filesystem__read_file")
+  const result = await rpc("tools/call", { name: tool.name, arguments: JSON.parse(call.function.arguments) })
+  assert.equal(result.content[0].text, secret)
+  messages.push(first.choices[0].message, { role: "tool", tool_call_id: call.id, content: result.content })
+  const last = await (await chat(bridge, messages, { tools: clientTools })).json()
+  assert.equal(last.choices[0].message.content, secret)
 })
