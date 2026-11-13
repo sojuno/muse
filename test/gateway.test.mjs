@@ -99,4 +99,32 @@ test("actual Magpie/Bun gateway converts Chat, Responses and Anthropic tool loop
     }
     assert.ok(rows.some(r => r.model.endsWith("-contributor")))
   })
+  await t.test("token splits reach Chat, Responses, Messages and Magpie's own ledger in both lanes", async () => {
+    for (const suffix of ["", "-contributor"]) {
+      const selected = model + suffix
+      const chat = await post("/v1/chat/completions", { model: selected, messages: [{ role: "user", content: "TOKEN_SPLITS" }] }, "tokens-chat" + suffix)
+      assert.deepEqual(chat.usage, { prompt_tokens: 19, completion_tokens: 4, total_tokens: 23,
+        prompt_tokens_details: { cached_tokens: 6, cache_write_tokens: 3 }, completion_tokens_details: { reasoning_tokens: 2 } })
+      const responses = await post("/v1/responses", { model: selected, input: "TOKEN_SPLITS" }, "tokens-responses" + suffix)
+      assert.equal(responses.usage.input_tokens, 19)
+      assert.equal(responses.usage.output_tokens, 4)
+      assert.equal(responses.usage.total_tokens, 23)
+      assert.deepEqual(responses.usage.input_tokens_details, { cached_tokens: 6, cache_write_tokens: 3 })
+      assert.equal(responses.usage.output_tokens_details.reasoning_tokens, 2)
+      const messages = await post("/v1/messages", { model: selected, messages: [{ role: "user", content: "TOKEN_SPLITS" }], max_tokens: 100 }, "tokens-messages" + suffix)
+      assert.equal(messages.usage.input_tokens, 10)
+      assert.equal(messages.usage.output_tokens, 4)
+      assert.equal(messages.usage.cache_read_input_tokens, 6)
+      assert.equal(messages.usage.cache_creation_input_tokens, 3)
+    }
+    const page = await (await fetch(base + "/v1/magpie/usage/requests?period=all&provider=muse-cli")).json()
+    const rows = page.rows.filter(row => row.cache_write === 3)
+    assert.equal(rows.length, 6)
+    for (const row of rows) {
+      assert.equal(row.in, 10)
+      assert.equal(row.out, 4)
+      assert.equal(row.cache_read, 6)
+      assert.equal(row.reasoning, 2)
+    }
+  })
 })

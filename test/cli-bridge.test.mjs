@@ -69,6 +69,33 @@ test("streams content and usage as Chat Completions SSE", async t => {
   assert.equal(output.chunks.at(-1).usage.prompt_tokens, 12)
 })
 
+for (const stream of [false, true]) for (const eventsOnly of [false, true]) test(`token splits survive tool continuation without duplicate billing (stream=${stream}, eventsOnly=${eventsOnly})`, async t => {
+  const { bridge } = await setup(t)
+  const expected = {
+    prompt_tokens: 19, completion_tokens: 4, total_tokens: 23,
+    prompt_tokens_details: { cached_tokens: 6, cache_write_tokens: 3 },
+    completion_tokens_details: { reasoning_tokens: 2 },
+  }
+  const read = async res => stream ? (await decode(res)).chunks.at(-1) : res.json()
+  const messages = user(`CALL_TOOL TOKEN_SPLITS ${eventsOnly ? "USAGE_EVENTS_ONLY" : ""}`)
+  const first = await chat(bridge, messages, { tools, stream })
+  let call, usage
+  if (stream) {
+    const decoded = await decode(first)
+    call = decoded.calls[0]; usage = decoded.chunks.at(-1).usage
+  } else {
+    const body = await first.json()
+    call = body.choices[0].message.tool_calls[0]; usage = body.usage
+  }
+  assert.deepEqual(usage, expected, "Use Muse's prompt total, separate cache reads/writes, and include reasoning once")
+  messages.push({ role: "assistant", content: "", tool_calls: [{ id: call.id, type: "function", function: call.function }] }, { role: "tool", tool_call_id: call.id, content: "CLIENT-RESULT" })
+  const last = await read(await chat(bridge, messages, { tools, stream }))
+  assert.deepEqual(last.usage, expected, "Final aggregate must exclude the usage already returned with the tool call")
+  messages.push({ role: "assistant", content: "CLIENT-RESULT" }, { role: "user", content: "TOKEN_SPLITS" })
+  const next = await read(await chat(bridge, messages, { tools, stream }))
+  assert.deepEqual(next.usage, expected, "A new user turn must reset usage")
+})
+
 for (const stream of [false, true]) test(`MCP tool -> client -> result -> same Muse turn (stream=${stream})`, async t => {
   const { bridge, requests } = await setup(t)
   const messages = user("CALL_TOOL")

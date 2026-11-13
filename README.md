@@ -75,11 +75,27 @@ Do not point Muse's `endpoint_transport` back at the same Magpie provider: that 
 
 Do not set `--contributor-mode` in `serveArgs`: the plugin owns that flag based on the selected model id.
 
-## Token usage and USD estimates
+## Token usage
 
-Magpie records the input, output, cache-read and reasoning token counts reported by the Muse CLI. A tool step can end before the complete Muse turn has its usage; the aggregate is reported when that turn finishes. Reasoning tokens are part of output and are not added to the USD estimate a second time.
+Token reporting works independently of USD pricing. Counts come from the official CLI, not a local text tokenizer, and reach both the client response and Magpie's Usage ledger.
 
-The provider is labeled **Muse CLI (API reference cost)**. USD figures are estimates using [Meta's public API prices](https://dev.meta.ai/products/meta-model-api/), checked **2026-11-13**; they are **not an additional charge to your Muse Code subscription**. See [PRICING.md](PRICING.md) for the rate table and limitations.
+| Counter | Chat Completions field | Magpie ledger |
+| --- | --- | --- |
+| Whole prompt, including cache | `prompt_tokens` | `in + cache_read + cache_write` |
+| Uncached input | Prompt minus cache reads/writes | `in` |
+| Output, including reasoning and tool generation | `completion_tokens` | `out` |
+| Cache read | `prompt_tokens_details.cached_tokens` | `cache_read` |
+| Cache write | `prompt_tokens_details.cache_write_tokens` | `cache_write` |
+| Reasoning, already included in output | `completion_tokens_details.reasoning_tokens` | `reasoning` |
+| Total, counting each token once | `total_tokens` | Prompt + output |
+
+The bridge uses Muse's server-derived `promptTokens`/`totalTokens` when available, because raw input counters can use different cache conventions. It keeps separate cache-read/cache-write counts when Muse supplies them. A missing optional split is exported as 0; this does **not** prove the provider performed no cache writes. The tested live Meta sessions reported cache reads but no separate cache-write count.
+
+Each client tool response reports the usage available at that point. The final response reports only the remaining usage, excluding tokens already returned with previous tool calls. Late usage is included when the native turn finishes. Multiple completions, parallel tools and subsequent user turns do not double count prior usage. Streamed responses include a final usage chunk before `[DONE]`; Magpie also converts the counters to Responses and Anthropic Messages formats.
+
+## Optional USD estimates
+
+The provider is labeled **Muse CLI**. Reference USD figures use [Meta's public API prices](https://dev.meta.ai/products/meta-model-api/), checked **2026-11-13**; they are **not an additional charge to your Muse Code subscription**. Set `referencePricing: false` to turn off the bundled price snapshot while keeping all token reporting. See [PRICING.md](PRICING.md) for the rate table and limitations.
 
 Per-model overrides are optional, in USD per million tokens:
 

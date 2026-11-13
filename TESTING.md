@@ -1,5 +1,27 @@
 # Validation record
 
+## Complete token counters and Wonder — 2026-11-13, v0.3.1
+
+Live checks used the user's existing official CLI login through **Magpie 0.1.3903 → Bun plugin → Muse Code 1.4.15 → Meta**. Spark 1.3, Spark 1.3 Contributor and **Wonder 1.0** each passed streamed chat, a real client-side stdio MCP file read, returning the actual file contents, and a following user message without tools. Each workflow made three client HTTP requests.
+
+All response counters summed exactly to Magpie's own Usage ledger, including **nonzero live cache hits**:
+
+| Model | Uncached input | Cache read | Cache write* | Whole prompt | Output | Reasoning† | Total |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| muse-spark-1.3 | 19,650 | 38,370 | 0 | 58,020 | 313 | 140 | 58,333 |
+| muse-spark-1.3-contributor | 19,722 | 38,370 | 0 | 58,092 | 341 | 164 | 58,433 |
+| muse-wonder-1.0 | 19,604 | 38,376 | 0 | 57,980 | 246 | 66 | 58,226 |
+
+*These live sessions did not report a separate cache-write count. A missing optional split is exported as 0, not evidence that the provider performed no writes. Automated Magpie/Bun tests use explicit nonzero cache writes (3), cache reads (6) and reasoning (2) and verify preservation in Chat, Responses, Anthropic Messages and the Usage ledger in both normal and contributor lanes.
+
+†Reasoning is already contained in output. Whole prompt includes uncached input and cache reads/writes; total is whole prompt plus output. Counts include the CLI's own instructions and all completions in each workflow, not just visible answer text.
+
+The bridge now uses Muse's server-derived counted-once prompt/total values, preserves read/write splits and reports incremental tool-step usage. The final response excludes tokens already returned with earlier tool calls. Tests cover a raw input counter that excludes cache, fallback without a turn aggregate, reset on the next user turn, and exact token sums across multiple completions using the unmodified official CLI and a deterministic local backend.
+
+**102 tests executed, 102 passed, 0 failed, 0 skipped**, with the official Muse and Magpie test binaries enabled (48 legacy, 39 bridge, 5 pricing, 3 official CLI, 7 gateway including nested checks). Package validation includes the new usage module. Token reporting is independent of optional reference pricing. No real credential values or live file contents were saved in the repository.
+
+This establishes live support for Wonder **1.0**, not every Wonder variant, and MCP tools rather than resources/prompts.
+
 ## Live account, contributor and USD reference costs — 2026-11-13
 
 The user completed the official `muse login` device flow. Separate live tests then ran through the actual Magpie gateway/Bun plugin host, the official Muse Code 1.4.15 CLI, and Meta's real service. No credential values were read by the plugin or copied into repository files/test fixtures.
@@ -23,7 +45,7 @@ Each response included 11 reasoning tokens, already contained in the 23 output t
 
 Automated regression run with all test binaries enabled: **97 executed, 97 passed, 0 failed, 0 skipped** (48 legacy, 35 bridge, 5 pricing, 3 official CLI, 6 gateway including nested protocol/contributor/accounting checks). The contributor CLI regression also verifies that the **actual CLI wire request** retains `muse-spark-1.3-contributor`, rather than only relabeling its response.
 
-Live validation covers Spark 1.3 and its contributor variant, not every available Muse model. Subscription allowance cards, full cross-process pending-tool recovery, MCP resources/prompts and tiered Ember price export remain outside this implementation.
+That earlier live run covered Spark 1.3 and its contributor variant; Wonder 1.0 is covered above. Subscription allowance cards, full cross-process pending-tool recovery, MCP resources/prompts and tiered Ember price export remain outside this implementation.
 
 ## Expanded capability check — 2026-11-13
 
@@ -43,7 +65,7 @@ Full run with `MUSE_TEST_BIN` and `MAGPIE_TEST_BIN`: **88 executed, 88 passed, 0
 
 The expanded run found and fixed a status-mapping defect: quota errors became 502, and streaming committed 200 before an immediate auth/quota error. These now preserve 429/401 until output begins. Errors after output begins remain SSE errors.
 
-The stdio filesystem MCP test is a separate client-side process performing a real file read. It does not establish compatibility with every third-party MCP server, server OAuth, resources or prompts. The protocol conversion tests demonstrate Chat, Responses and Messages transport behavior, not every Codex/Claude client feature. Live Meta account inference, quota accounting and full subscription/interactive parity remain unverified.
+The stdio filesystem MCP test is a separate client-side process performing a real file read. It does not establish compatibility with every third-party MCP server, server OAuth, resources or prompts. The protocol conversion tests demonstrate Chat, Responses and Messages transport behavior, not every Codex/Claude client feature. At that stage live Meta account inference had not yet been verified; see subsequent live checks above. Full subscription/interactive parity remains unverified.
 
 ## Initial validation — 2026-11-12
 

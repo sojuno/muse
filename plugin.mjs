@@ -27,7 +27,7 @@ export const MuseCLIPlugin = async (input, options = {}) => {
   return {
     async config(config) {
       config.provider ??= {}
-      config.provider[ID] ??= { name: "Muse CLI (API reference cost)", npm: "@ai-sdk/openai-compatible", api: BASE,
+      config.provider[ID] ??= { name: "Muse CLI", npm: "@ai-sdk/openai-compatible", api: BASE,
         models: Object.fromEntries(withContributors(FALLBACK.map(id => ({ id }))).map(m => [m.id, simple(m)])),
       }
     },

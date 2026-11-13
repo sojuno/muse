@@ -44,7 +44,7 @@ for (const [stream, contributorMode] of [[false, false], [true, false], [true, t
       send("response.output_item.added", { output_index: i, item })
       send("response.output_item.done", { output_index: i, item })
     }
-    send("response.completed", { response: { ...response, status: "completed", output, usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } })
+    send("response.completed", { response: { ...response, status: "completed", output, usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15, input_tokens_details: { cached_tokens: 2 }, output_tokens_details: { reasoning_tokens: 1 } } } })
     res.end()
   })
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve))
@@ -57,13 +57,15 @@ for (const [stream, contributorMode] of [[false, false], [true, false], [true, t
   const tools = ["fs/read.file", ...(stream ? ["mcp__filesystem__read_file"] : [])].map(name => ({ type: "function", function: { name, description: "Client file tool", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } }))
   const messages = [{ role: "user", content: "Use the client file tool to read example.txt." }]
   const chat = () => bridge.fetch("http://muse-cli.invalid/v1/chat/completions", { method: "POST", headers: { "x-magpie-session": "real-cli" }, body: JSON.stringify({ model, messages, tools, stream }) })
+  const usages = []
   const read = async res => {
     if (!stream || !res.ok) return res.json()
     const message = { role: "assistant", content: "" }, calls = []
-    let finish_reason
+    let finish_reason, usage
     for (const line of (await res.text()).split("\n")) {
       if (!line.startsWith("data: ") || line === "data: [DONE]") continue
       const chunk = JSON.parse(line.slice(6)); assert.equal(chunk.error, undefined, JSON.stringify(chunk))
+      usage = chunk.usage ?? usage
       for (const choice of chunk.choices ?? []) {
         message.content += choice.delta.content ?? ""
         calls.push(...(choice.delta.tool_calls ?? []).map(({ index, ...call }) => call))
@@ -71,11 +73,12 @@ for (const [stream, contributorMode] of [[false, false], [true, false], [true, t
       }
     }
     if (calls.length) message.tool_calls = calls
-    return { choices: [{ message, finish_reason }] }
+    return { choices: [{ message, finish_reason }], usage }
   }
   let last, called = []
   for (let step = 0; step < 4; step++) {
     last = await read(await chat())
+    if (last.usage) usages.push(last.usage)
     const choice = last.choices?.[0]
     assert.ok(choice, JSON.stringify(last))
     if (choice.finish_reason !== "tool_calls") break
@@ -94,6 +97,13 @@ for (const [stream, contributorMode] of [[false, false], [true, false], [true, t
   assert.ok(outputs.some(o => JSON.stringify(o).includes("ONLY_THE_CLIENT_PRODUCES_THIS_RESULT")))
   assert.equal(bridge.sessions.size, 1)
   assert.ok(primary.length >= 2)
+  const sum = field => usages.reduce((n, usage) => n + field(usage), 0)
+  assert.equal(sum(u => u.prompt_tokens), primary.length * 10, "Tool responses and final response must count every completion exactly once")
+  assert.equal(sum(u => u.completion_tokens), primary.length * 5)
+  assert.equal(sum(u => u.total_tokens), primary.length * 15)
+  assert.equal(sum(u => u.prompt_tokens_details.cached_tokens), primary.length * 2)
+  assert.equal(sum(u => u.prompt_tokens_details.cache_write_tokens), 0)
+  assert.equal(sum(u => u.completion_tokens_details.reasoning_tokens), primary.length)
   assert.ok(primary.every(p => p.model === model), "The actual CLI wire request must retain the selected model, including its contributor suffix")
   assert.ok(primary.every(p => p.tools.every(group => group.name === "mcp__magpie_client")), "Main agent must be offered client tools only")
   assert.ok(approvals.some(a => a.decision === "approved"))

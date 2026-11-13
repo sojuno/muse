@@ -18,6 +18,14 @@ async function turn(sessionId, turnId, input) {
   const s = sessions.get(sessionId), state = { cancelled: false }
   running.set(turnId, state)
   const user = input.findLast(p => p.type === "text")?.text ?? ""
+  let completions = 0
+  const tokenSplit = { inputTokens: 10, outputTokens: 4, cachedTokens: 9, cacheReadTokens: 6, cacheWriteTokens: 3, reasoningTokens: 2 }
+  const reportUsage = () => {
+    if (!user.includes("TOKEN_SPLITS")) return
+    completions++
+    notify("session/tokenUsage", { sessionId, turnId, usage: tokenSplit, promptTokens: 19, totalTokens: 23,
+      cumulative: { promptTokens: completions * 19, outputTokens: completions * 4, totalTokens: completions * 23 } })
+  }
   try {
     if (user.includes("CRASH")) process.exit(7)
     if (user.includes("AUTH_REQUIRED")) {
@@ -32,6 +40,7 @@ async function turn(sessionId, turnId, input) {
       const chosen = user.includes("PARALLEL") ? s.tools : s.tools.slice(0, 1)
       const all = []
       for (let step = 0; step < (user.includes("TWICE") ? 2 : 1); step++) {
+        reportUsage()
         const result = await Promise.all(chosen.map(t => rpc(s.url, "tools/call", { name: t.name, arguments: { path: "example.txt" } })))
         log({ method: "test/tool-result", params: result })
         all.push(...result)
@@ -49,7 +58,9 @@ async function turn(sessionId, turnId, input) {
     notify("item/started", { sessionId, item: { itemId, turnId, kind: "agentMessage", text: "" } })
     if (!user.includes("COMPLETE_ONLY")) notify("item/delta", { sessionId, itemId, field: "text", delta: answer })
     notify("item/completed", { sessionId, item: { itemId, turnId, kind: "agentMessage", text: answer } })
-    notify("turn/completed", { sessionId, turnId, terminal: "completed", usage: { inputTokens: 12, outputTokens: 4, cachedTokens: 2 } })
+    reportUsage()
+    const usage = user.includes("TOKEN_SPLITS") ? Object.fromEntries(Object.entries(tokenSplit).map(([key, value]) => [key, value * completions])) : { inputTokens: 12, outputTokens: 4, cachedTokens: 2 }
+    notify("turn/completed", { sessionId, turnId, terminal: "completed", ...(user.includes("USAGE_EVENTS_ONLY") ? {} : { usage }) })
   } catch (e) { notify("turn/completed", { sessionId, turnId, terminal: "failed", error: { message: e.message } }) }
   finally { running.delete(turnId) }
 }

@@ -4,6 +4,7 @@ import os from "node:os"
 import { createHash, randomUUID } from "node:crypto"
 import { MuseHost } from "./host.mjs"
 import { ToolServer } from "./mcp.mjs"
+import { TurnUsage } from "./usage.mjs"
 
 const hash = s => createHash("sha256").update(s).digest("hex")
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -178,8 +179,7 @@ class Session {
       return
     }
     if (n.method === "session/tokenUsage" && p.usage) {
-      this.usage ??= { inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 }
-      for (const k of Object.keys(this.usage)) this.usage[k] += Number(p.usage[k]) || 0
+      this.usage.add(p)
     }
     if (n.method.startsWith("item/") && p.item) {
       const item = p.item
@@ -201,7 +201,7 @@ class Session {
       }
     }
     if (n.method === "turn/completed") this.finish({
-      usage: p.usage ?? this.usage,
+      usage: this.usage.take(p.usage),
       status: p.error?.kind === "authRequired" ? 401 : p.error && (p.error.quota != null || /quota|rate.?limit/i.test(p.error.kind ?? "")) ? 429 : 502,
       error: p.error ? (p.error.kind === "authRequired" ? "Muse is not signed in. Run muse login in a terminal." : p.error.message ?? "Muse turn failed") : p.terminal === "failed" ? (p.reason ?? "Muse turn failed") : undefined,
     })
@@ -306,7 +306,7 @@ export class MuseBridge {
         request.signal.throwIfAborted()
         if (pending) { session.toolChoice = body.tool_choice; session.deliver(body.messages) }
         else {
-          session.events = new Events(); session.usage = null
+          session.events = new Events(); session.usage = new TurnUsage()
           void session.begin({ ...body, reasoning_effort: effort }, body.messages, !session.completedHistory).catch(e => session.finish({ error: e.message }))
         }
         return await this.response(session, body, request.signal, done)
@@ -317,7 +317,6 @@ export class MuseBridge {
     const id = `chatcmpl-${randomUUID()}`
     const created = Math.floor(Date.now() / 1000)
     let content = "", reasoning = "", calls = []
-    const usageOf = u => u ? { prompt_tokens: u.inputTokens ?? 0, completion_tokens: u.outputTokens ?? 0, total_tokens: (u.inputTokens ?? 0) + (u.outputTokens ?? 0), prompt_tokens_details: { cached_tokens: u.cachedTokens ?? 0 }, completion_tokens_details: { reasoning_tokens: u.reasoningTokens ?? 0 } } : undefined
     const next = async () => {
       let event = await session.events.next()
       if (event.type === "tool") {
@@ -325,7 +324,7 @@ export class MuseBridge {
         await pause(5)
         const tools = [event]
         while (session.events.values[0]?.type === "tool") tools.push(session.events.values.shift())
-        event = { type: "tools", tools }
+        event = { type: "tools", tools, usage: session.usage.take() }
       }
       if (event.type === "text") content += event.text
       if (event.type === "reasoning") reasoning += event.text
@@ -349,7 +348,7 @@ export class MuseBridge {
         while (true) {
           const e = await take()
           if (e.type === "done" && e.error) return errorResponse(e.status ?? 502, e.error)
-          if (e.type === "tools" || e.type === "done") return Response.json({ id, object: "chat.completion", created, model: body.model, choices: [{ index: 0, message: { role: "assistant", content, ...(reasoning ? { reasoning_content: reasoning } : {}), ...(calls.length ? { tool_calls: calls.map(({ index, ...c }) => c) } : {}) }, finish_reason: calls.length ? "tool_calls" : "stop" }], usage: usageOf(e.usage) })
+          if (e.type === "tools" || e.type === "done") return Response.json({ id, object: "chat.completion", created, model: body.model, choices: [{ index: 0, message: { role: "assistant", content, ...(reasoning ? { reasoning_content: reasoning } : {}), ...(calls.length ? { tool_calls: calls.map(({ index, ...c }) => c) } : {}) }, finish_reason: calls.length ? "tool_calls" : "stop" }], usage: e.usage })
         }
       } finally { release() }
     }
@@ -364,10 +363,14 @@ export class MuseBridge {
             const e = await take()
             if (e.type === "text") emit(chunk({ content: e.text }))
             if (e.type === "reasoning") emit(chunk({ reasoning_content: e.text }))
-            if (e.type === "tools") { emit(chunk({ tool_calls: calls })); emit(chunk({}, "tool_calls")); break }
+            if (e.type === "tools") {
+              emit(chunk({ tool_calls: calls })); emit(chunk({}, "tool_calls"))
+              if (e.usage) emit({ id, object: "chat.completion.chunk", created, model: body.model, choices: [], usage: e.usage })
+              break
+            }
             if (e.type === "done") {
               if (e.error) emit({ error: { type: "muse_cli_error", message: e.error } })
-              else { emit(chunk({}, "stop")); if (e.usage) emit({ id, object: "chat.completion.chunk", created, model: body.model, choices: [], usage: usageOf(e.usage) }) }
+              else { emit(chunk({}, "stop")); if (e.usage) emit({ id, object: "chat.completion.chunk", created, model: body.model, choices: [], usage: e.usage }) }
               break
             }
           }

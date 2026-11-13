@@ -23,7 +23,7 @@ USD estimate = (
 ) / 1,000,000
 ```
 
-The API's prompt token total includes cached tokens. Magpie stores uncached input and cache read separately; the cached portion is not charged twice. Reasoning tokens are already contained in output tokens and are not added again. The gateway regression verifies actual ledger token counts and cost arithmetic for both ordinary and contributor Spark.
+The API's prompt token total includes cache reads and writes. Magpie stores uncached input, cache read and cache write separately; the cached portion is not charged twice. Reasoning tokens are already contained in output tokens and are not added again. Token counters remain available with reference pricing disabled. The gateway regression verifies ledger token counts and cost arithmetic for ordinary and contributor Spark, including separate nonzero read/write splits across protocol conversions.
 
 ## Unpriced and tiered models
 
