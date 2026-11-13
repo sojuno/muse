@@ -16,10 +16,10 @@ This replaces the package entry point of the earlier direct-OAuth plugin. Its so
 
 Install Muse Code from its official source, verify `muse --version` reports **1.4.15**, and sign in using `muse login` if you have not already. Existing CLI authentication is reused.
 
-From this branch:
+From the main branch:
 
 ```sh
-git clone --branch feat/muse-cli-bridge https://github.com/sojuno/muse.git
+git clone https://github.com/sojuno/muse.git
 cd muse
 npm ci --ignore-scripts
 magpie plugin add "$PWD"
