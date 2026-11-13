@@ -1,35 +1,5 @@
-// Meta Muse (api.meta.ai) device-code OAuth + API-key minting, modelled on
-// the Nous Portal plugin's auth module. The host owns persistence; this
-// module never reads Meta's (or any other app's) credential files.
-//
-// Two ways in, one stored shape (access = minted API key, refresh = JSON
-// with the DCA token + account details, expires = DCA deadline or now +
-// 1h). (1) Device-code OAuth, as CLIProxyAPI's Go implementation proves
-// it works:
-//   1. POST auth.meta.com/oidc/device/authorization/ with Meta Muse CLI's
-//      client_id -> device_code + user_code + verification URI.
-//   2. Poll auth.meta.com/oidc/device/token/ (RFC 8628) until the user
-//      approves in the browser -> DCA token (dca:...).
-//   3. POST api.meta.ai/muse-code/key with the DCA token -> a real API key.
-// (2) Import: paste a CLIProxyAPI Meta auth file (its whole JSON) — or
-// just its dca_token — and the plugin mints a fresh key from that DCA
-// token to prove it still works. The file's account details fill in
-// whatever the mint response does not say. Minting does not rotate the
-// DCA token, so the file's owner (CLIProxyAPI) keeps working alongside
-// Magpie — unlike a Codex import, which spends the refresh token and
-// signs the source tool out.
-// The API key is the usable credential: it does not expire on the DCA
-// timer, so the stored `expires` is the DCA deadline (the point after
-// which a fresh key can no longer be minted and the user must sign in
-// again), and `access` holds the API key.
-//
-// WARNING: this uses Meta Muse CLI's own OAuth client_id and user-agent to
-// sign in outside the CLI, then calls Meta's Model API directly. Meta's
-// terms say a Muse Code subscription is for use with the Muse Code CLI;
-// this path carries the same ToS / account risk as CLIProxyAPI's Meta
-// support, including a possible 403 client_attestation_denied if Meta
-// tightens attestation. Prefer the `muse serve` path (opencode-muse) when
-// that risk matters more than having a gateway-routable provider.
+// Meta device-code OAuth and API-key renewal. Magpie owns persistence.
+// This module never reads another application's credential files.
 import { createHash } from "node:crypto"
 
 export const ID = "muse"
@@ -39,30 +9,7 @@ export const TOKEN_URL = AUTH_HOST + "/oidc/device/token/"
 export const MINT_URL = "https://api.meta.ai/muse-code/key"
 export const API_BASE = "https://api.meta.ai/v1"
 export const CLIENT_ID = "1031625952748946"
-export const USER_AGENT = "muse-code/1.0.2"
-// The build User-Agent the real CLI sends, captured from Muse Code
-// 1.4.14-R7309.1 (build dec7d7497fecdad135ec5835a8161dbc92e55b58) on
-// linux-x86_64 — the same values CLIProxyAPI v8.0.63 sends. The version
-// and the build hash must move together: a new version with the old
-// build's hash would be an inconsistent fingerprint. The platform is
-// the host's own (CPA builds it from runtime.GOOS/GOARCH the same way);
-// gateway requests are non-interactive, unlike the CLI's own terminal.
-const META_CLIENT_VERSION = "1.4.14"
-const META_CLIENT_BUILD = "dec7d7497fecdad135ec5835a8161dbc92e55b58"
-function buildUserAgent() {
-  const p = typeof process !== "undefined" ? process : {}
-  let os = String(p.platform ?? "")
-  if (os === "darwin") os = "macos"
-  if (os === "win32") os = "windows"
-  let arch = String(p.arch ?? "")
-  if (arch === "x64" || arch === "amd64") arch = "x86_64"
-  if (arch === "arm64") arch = "aarch64"
-  if (!os) os = "linux"
-  if (!arch) arch = "x86_64"
-  return `muse-build/${META_CLIENT_VERSION} (non-interactive; ${os}-${arch}; build ${META_CLIENT_BUILD})`
-}
-export const BUILD_USER_AGENT = buildUserAgent()
-export const CLIENT_HEADER = "tbh:exec"
+export const USER_AGENT = "magpie-muse/0.4.0"
 export const GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 export const LEAD = 120000
 export const MAX_POLL = 15 * 60 * 1000
@@ -147,7 +94,7 @@ async function mint(dcaToken, request) {
         Accept: "application/json", "Content-Type": "application/json",
         Authorization: "Bearer " + dcaToken, "User-Agent": USER_AGENT,
       },
-      body: JSON.stringify({ dca_token: dcaToken }),
+      body: "{}",
       signal: AbortSignal.timeout(30000),
     })
   } catch { throw new AuthError("mint_endpoint_unavailable") }

@@ -4,14 +4,52 @@ import http from "node:http"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 import { spawnSync } from "node:child_process"
 import { MuseBridge } from "../src/bridge.mjs"
 
+test("official CLI refuses inherited gateway MCP before starting any server", { skip: !process.env.MUSE_TEST_BIN, timeout: 15000 }, async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "muse-global-mcp-isolation-"))
+  const config = path.join(directory, "config", "muse")
+  fs.mkdirSync(config, { recursive: true })
+  const marker = path.join(directory, "gateway-server-started")
+  const settings = JSON.stringify({ schema_version: 1, mcpServers: { gateway_trap: { type: "stdio", command: process.execPath,
+    args: [fileURLToPath(new URL("./fixtures/filesystem-mcp.mjs", import.meta.url)), directory], env: { MCP_STARTUP_MARKER: marker }, mode: "required" } } })
+  const settingsPath = path.join(config, "settings.json")
+  fs.writeFileSync(settingsPath, settings)
+  const bridge = new MuseBridge({ workspace: "/remote-client/project", museBin: process.env.MUSE_TEST_BIN,
+    museEnv: { XDG_CONFIG_HOME: path.join(directory, "config"), XDG_DATA_HOME: path.join(directory, "data"), XDG_CACHE_HOME: path.join(directory, "cache"), META_API_KEY: "test-only-never-used" } })
+  t.after(async () => { await bridge.close(); fs.rmSync(directory, { recursive: true, force: true }) })
+  const response = await bridge.fetch("http://muse-cli.invalid/v1/chat/completions", { method: "POST", body: JSON.stringify({ model: "muse-spark-1.3", messages: [{ role: "user", content: "Do not execute gateway tools" }] }) })
+  assert.equal(response.status, 503)
+  assert.match((await response.json()).error.message, /Gateway MCP isolation/)
+  assert.equal(bridge.host.generation, 0)
+  assert.equal(fs.existsSync(marker), false, "Even gateway MCP startup hooks must not run")
+  assert.equal(fs.readFileSync(settingsPath, "utf8"), settings, "Do not alter the user's MCP settings")
+})
+
 // This test uses the unmodified official Linux CLI, with a deterministic API on
 // loopback. No Meta login, real credential or subscription quota is involved.
-for (const [stream, contributorMode, baseModel] of [[false, false, "muse-spark-1.3"], [true, false, "muse-spark-1.3"], [true, true, "muse-spark-1.3"], [true, true, "muse-wonder-1.0"]]) test(`official Muse CLI: MCP tools cross client HTTP turns (model=${baseModel}, stream=${stream}, contributor=${contributorMode})`, { skip: !process.env.MUSE_TEST_BIN, timeout: 30000 }, async t => {
+for (const { stream, contributorMode, baseModel, clientTools = false, denyShell = false } of [
+  { stream: false, contributorMode: false, baseModel: "muse-spark-1.3" },
+  { stream: true, contributorMode: false, baseModel: "muse-spark-1.3" },
+  { stream: true, contributorMode: true, baseModel: "muse-spark-1.3" },
+  { stream: true, contributorMode: true, baseModel: "muse-wonder-1.0" },
+  { stream: true, contributorMode: false, baseModel: "muse-spark-1.3", clientTools: true },
+  { stream: true, contributorMode: true, baseModel: "muse-wonder-1.0", clientTools: true, denyShell: true },
+]) test(`official Muse CLI: MCP round trip (model=${baseModel}, stream=${stream}, contributor=${contributorMode}, clientTools=${clientTools}, denyShell=${denyShell})`, { skip: !process.env.MUSE_TEST_BIN, timeout: 30000 }, async t => {
   const model = `${baseModel}${contributorMode ? "-contributor" : ""}`
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "muse-real-cli-test-"))
+  const clientDirectory = path.join(directory, "client-machine")
+  fs.mkdirSync(clientDirectory)
+  const clientLabel = `/remote-client/projects/${path.basename(directory)}`
+  const operations = [
+    { name: "write", args: { filePath: clientLabel + "/client-file.txt", content: "ORIGINAL_CLIENT_DATA" } },
+    { name: "read", args: { filePath: clientLabel + "/client-file.txt" } },
+    { name: "edit", args: { filePath: clientLabel + "/client-file.txt", oldString: "ORIGINAL", newString: "EDITED" } },
+    { name: "bash", args: { command: "pwd > client-shell.txt", description: "Record the client working directory" } },
+  ]
+  for (const name of ["client-file.txt", "client-shell.txt"]) fs.writeFileSync(path.join(directory, name), "GATEWAY_UNTOUCHED")
   const museEnv = { XDG_CONFIG_HOME: path.join(directory, "config"), XDG_DATA_HOME: path.join(directory, "data"), XDG_CACHE_HOME: path.join(directory, "cache"), META_API_KEY: "test-only-local-backend" }
   const auth = spawnSync(process.env.MUSE_TEST_BIN, ["auth", "set", "--provider", "meta", "--api-key-stdin"], { input: "test-only-local-backend\n", env: { ...process.env, ...museEnv }, encoding: "utf8" })
   assert.equal(auth.status, 0, auth.stderr)
@@ -28,7 +66,12 @@ for (const [stream, contributorMode, baseModel] of [[false, false, "muse-spark-1
     let output
     if (group) {
       primary.push(body); outputs.push(...results)
-      if (!results.length) output = group.tools.map((tool, i) => ({ type: "function_call", id: `fc_client_${i}`, call_id: `call_client_${i}`, name: `${group.name}.${tool.name}`, arguments: '{"path":"example.txt"}', status: "completed" }))
+      if (clientTools && primary.length <= operations.length) {
+        const operation = operations[primary.length - 1]
+        const tool = group.tools.find(t => t.description?.includes(`CLIENT_TOOL_${operation.name}`))
+        assert.ok(tool, `Only the client ${operation.name} schema may be selected`)
+        output = [{ type: "function_call", id: `fc_step_${primary.length}`, call_id: `call_step_${primary.length}`, name: `${group.name}.${tool.name}`, arguments: JSON.stringify(operation.args), status: "completed" }]
+      } else if (!results.length) output = group.tools.map((tool, i) => ({ type: "function_call", id: `fc_client_${i}`, call_id: `call_client_${i}`, name: `${group.name}.${tool.name}`, arguments: '{"path":"example.txt"}', status: "completed" }))
       else output = [{ type: "reasoning", id: "rs_final", summary: [{ type: "summary_text", text: "Checked the tool result." }] }, { type: "message", id: "msg_final", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Verified client tool output.", annotations: [] }] }]
     } else {
       internal.push(body)
@@ -49,14 +92,17 @@ for (const [stream, contributorMode, baseModel] of [[false, false, "muse-spark-1
     res.end()
   })
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve))
-  const bridge = new MuseBridge({ workspace: directory, museBin: process.env.MUSE_TEST_BIN, museEnv, contributorMode,
+  const bridge = new MuseBridge({ workspace: clientTools ? clientLabel : directory, museBin: process.env.MUSE_TEST_BIN, museEnv, contributorMode,
     serveArgs: ["--model", baseModel, "-c", `endpoint_transport=${JSON.stringify({ base_url: `http://127.0.0.1:${server.address().port}/v1`, auth: "none" })}`],
     turnTimeoutMs: 15000,
   })
   t.after(async () => { await bridge.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); fs.rmSync(directory, { recursive: true, force: true }) })
   bridge.host.subscribe(n => { if (n.method === "approval/resolved") approvals.push(n.params) })
-  const tools = ["fs/read.file", ...(stream ? ["mcp__filesystem__read_file"] : [])].map(name => ({ type: "function", function: { name, description: "Client file tool", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } }))
-  const messages = [{ role: "user", content: "Use the client file tool to read example.txt." }]
+  const tools = clientTools ? operations.map(operation => ({ type: "function", function: { name: operation.name, description: `CLIENT_TOOL_${operation.name}`, parameters: { type: "object", properties: Object.fromEntries(Object.keys(operation.args).map(key => [key, { type: "string" }])), required: Object.keys(operation.args) } } }))
+    : ["fs/read.file", ...(stream ? ["mcp__filesystem__read_file"] : [])].map(name => ({ type: "function", function: { name, description: "Client file tool", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } }))
+  const messages = [{ role: "system", content: "CLIENT_SYSTEM_RULE: use the client's tools for client operations." },
+    { role: "developer", content: [{ type: "text", text: "CLIENT_DEVELOPER_RULE: keep user instructions and tool result data separate." }] },
+    { role: "user", content: "Use the client file tool to read example.txt." }]
   const chat = () => bridge.fetch("http://muse-cli.invalid/v1/chat/completions", { method: "POST", headers: { "x-magpie-session": "real-cli" }, body: JSON.stringify({ model, messages, tools, stream, reasoning_effort: "low" }) })
   const usages = []
   const read = async res => {
@@ -78,7 +124,14 @@ for (const [stream, contributorMode, baseModel] of [[false, false, "muse-spark-1
     return { choices: [{ message, finish_reason }], usage }
   }
   let last, called = []
-  for (let step = 0; step < 4; step++) {
+  const checkGateway = () => {
+    for (const name of ["client-file.txt", "client-shell.txt"]) {
+      assert.equal(fs.readFileSync(path.join(directory, name), "utf8"), "GATEWAY_UNTOUCHED")
+      assert.equal(fs.existsSync(path.join(bridge.host.dataDirectory, name)), false)
+      for (const session of bridge.sessions.values()) assert.equal(fs.existsSync(path.join(session.museWorkspace, name)), false)
+    }
+  }
+  for (let step = 0; step < (clientTools ? 6 : 4); step++) {
     last = await read(await chat())
     if (last.usage) usages.push(last.usage)
     const choice = last.choices?.[0]
@@ -89,15 +142,45 @@ for (const [stream, contributorMode, baseModel] of [[false, false, "muse-spark-1
     messages.push(choice.message)
     for (const call of calls) {
       assert.ok(tools.some(t => t.function.name === call.function.name))
-      assert.deepEqual(JSON.parse(call.function.arguments), { path: "example.txt" })
+      const args = JSON.parse(call.function.arguments)
       called.push(call.function.name)
-      messages.push({ role: "tool", tool_call_id: call.id, content: "ONLY_THE_CLIENT_PRODUCES_THIS_RESULT" })
+      if (!clientTools) {
+        assert.deepEqual(args, { path: "example.txt" })
+        messages.push({ role: "tool", tool_call_id: call.id, content: "ONLY_THE_CLIENT_PRODUCES_THIS_RESULT" })
+        continue
+      }
+      checkGateway()
+      const operation = operations[called.length - 1]
+      assert.equal(call.function.name, operation.name)
+      assert.deepEqual(args, operation.args, "Keep the client's original schema and arguments")
+      let content, is_error = false
+      const file = path.join(clientDirectory, "client-file.txt")
+      if (operation.name === "write") { assert.equal(fs.existsSync(file), false); fs.writeFileSync(file, args.content); content = "CLIENT_WRITE_OK" }
+      if (operation.name === "read") { content = fs.readFileSync(file, "utf8"); assert.equal(content, "ORIGINAL_CLIENT_DATA") }
+      if (operation.name === "edit") { fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(args.oldString, args.newString)); content = "CLIENT_EDIT_OK" }
+      if (operation.name === "bash") {
+        if (denyShell) { content = "CLIENT_DENIED_BASH"; is_error = true }
+        else {
+          const shell = spawnSync("/bin/sh", ["-c", args.command], { cwd: clientDirectory, encoding: "utf8", timeout: 5000 })
+          assert.equal(shell.status, 0, shell.stderr)
+          assert.equal(fs.readFileSync(path.join(clientDirectory, "client-shell.txt"), "utf8").trim(), clientDirectory)
+          content = "CLIENT_BASH_OK"
+        }
+      }
+      messages.push({ role: "tool", tool_call_id: call.id, content, is_error })
+      checkGateway()
     }
   }
   assert.deepEqual(called.sort(), tools.map(t => t.function.name).sort())
   assert.equal(last.choices?.[0]?.message.content, "Verified client tool output.", JSON.stringify(last))
   assert.equal(last.choices?.[0]?.message.reasoning_content, "Checked the tool result.", "Real CLI reasoning summaries must reach the client without duplication")
-  assert.ok(outputs.some(o => JSON.stringify(o).includes("ONLY_THE_CLIENT_PRODUCES_THIS_RESULT")))
+  if (clientTools) {
+    assert.equal(fs.readFileSync(path.join(clientDirectory, "client-file.txt"), "utf8"), "EDITED_CLIENT_DATA")
+    assert.equal(fs.existsSync(path.join(clientDirectory, "client-shell.txt")), !denyShell)
+    assert.ok(outputs.some(o => JSON.stringify(o).includes(denyShell ? "CLIENT_DENIED_BASH" : "CLIENT_BASH_OK")))
+    assert.ok(outputs.some(o => JSON.stringify(o).includes("ORIGINAL_CLIENT_DATA")))
+    checkGateway()
+  } else assert.ok(outputs.some(o => JSON.stringify(o).includes("ONLY_THE_CLIENT_PRODUCES_THIS_RESULT")))
   assert.equal(bridge.sessions.size, 1)
   assert.ok(primary.length >= 2)
   const sum = field => usages.reduce((n, usage) => n + field(usage), 0)
@@ -109,6 +192,12 @@ for (const [stream, contributorMode, baseModel] of [[false, false, "muse-spark-1
   assert.equal(sum(u => u.completion_tokens_details.reasoning_tokens), primary.length)
   assert.ok(primary.every(p => p.model === model), "The actual CLI wire request must retain the selected model, including its contributor suffix")
   assert.ok(primary.every(p => p.reasoning?.effort === "low"), "The selected reasoning effort must reach the real CLI model request")
+  for (const request of primary) {
+    const input = JSON.stringify(request.input)
+    assert.equal(input.split("CLIENT_SYSTEM_RULE").length - 1, 1)
+    assert.equal(input.split("CLIENT_DEVELOPER_RULE").length - 1, 1)
+    assert.equal(String(JSON.stringify(request.instructions)).includes("CLIENT_SYSTEM_RULE"), false, "MSP carries client instructions as context; it does not replace Muse's system instructions")
+  }
   assert.ok(primary.every(p => p.tools.every(group => group.name === "mcp__magpie_client")), "Main agent must be offered client tools only")
   assert.equal(internal.length, 0, "Reminder observers must not generate hidden model requests")
   assert.ok(approvals.some(a => a.decision === "approved"))

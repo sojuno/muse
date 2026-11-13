@@ -16,7 +16,7 @@
 // Scaffold follows the Nous Portal plugin's shape (config /
 // provider.models / auth.loader / auth.refresh / auth.methods), so
 // Magpie's host and OpenCode 1.x/2.x load it the same way.
-import { ID, API_BASE, BUILD_USER_AGENT, CLIENT_HEADER, AuthError, createAuth, metadata } from "./oauth.mjs"
+import { ID, API_BASE, USER_AGENT, AuthError, createAuth, metadata } from "./oauth.mjs"
 
 const NPM = "@ai-sdk/openai"
 
@@ -401,8 +401,7 @@ export async function MuseAuthPlugin({ client }) {
       req.signal.throwIfAborted()
       const headers = new Headers()
       headers.set("Authorization", "Bearer " + current.access)
-      headers.set("User-Agent", BUILD_USER_AGENT)
-      headers.set("X-Client-Id", CLIENT_HEADER)
+      headers.set("User-Agent", USER_AGENT)
       headers.set("Content-Type", "application/json")
       headers.set("Accept", "text/event-stream")
       return fetch(API_BASE + "/responses", {

@@ -1,3 +1,5 @@
+> Historical documentation for the original imported adapter. Current installation and behavior are in [README.md](README.md). Importing credential files and spoofing a CLI build are not part of the v0.4.0 sign-in flow.
+
 # magpie-muse-auth
 
 Muse (Meta) provider plugin for [Magpie](https://github.com/yetone/magpie) and OpenCode, written in the shape of the Nous Portal plugin (`@magpie-community/opencode-nous-auth`).

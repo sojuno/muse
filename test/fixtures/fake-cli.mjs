@@ -7,6 +7,10 @@ const sessions = new Map(), running = new Map()
 const send = msg => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n")
 const notify = (method, params) => send({ method, params })
 const log = entry => { if (process.env.FAKE_CLI_LOG) fs.appendFileSync(process.env.FAKE_CLI_LOG, JSON.stringify(entry) + "\n") }
+if (process.argv.includes("mcp") && process.argv.includes("list")) {
+  await new Promise(resolve => process.stdout.write(JSON.stringify({ servers: JSON.parse(process.env.FAKE_GATEWAY_MCP ?? "[]") }) + "\n", resolve))
+  process.exit(0)
+}
 log({ method: "test/launch", params: { args: process.argv.slice(2) } })
 const rpc = async (url, method, params = {}) => {
   const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: randomUUID(), method, params }) })
@@ -36,6 +40,12 @@ async function turn(sessionId, turnId, input) {
       notify("turn/completed", { sessionId, turnId, terminal: "failed", error: { kind: "quotaExceeded", quota: {}, message: "Test subscription limit reached" } }); return
     }
     if (user.includes("SLOW")) await new Promise(r => setTimeout(r, 1000))
+    if (user.includes("ASK_NATIVE")) for (const toolName of ["bash", `mcp__magpie_client_evil__${s.tools[0]?.name ?? "tool_fake"}`]) {
+      const approvalId = randomUUID()
+      notify("approval/requested", { sessionId, turnId, approvalId, toolName, currentRequirementId: { approvalId, sourceIndex: 0 }, availableChoices: [
+        { choiceId: "allow-once", decision: "approved", scope: "once" }, { choiceId: "deny", decision: "denied", scope: "once" },
+      ] })
+    }
     let answer = `Echo: ${user}`
     if (user.includes("CALL_TOOL") || user.includes("PARALLEL")) {
       const chosen = user.includes("PARALLEL") ? s.tools : s.tools.slice(0, 1)

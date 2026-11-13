@@ -1,3 +1,19 @@
+# Direct API architecture review — 2026-11-13
+
+Reviewed the Muse provider in [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi/tree/84f5adc3bbfc0c2a7caecbad78b1b6eedf0a2939) at commit `84f5adc3bbfc0c2a7caecbad78b1b6eedf0a2939`. This review covers the relevant provider/authentication paths, not a security audit of the whole repository. No upstream runtime code was copied or installed as a dependency.
+
+- `packages/catalog/src/compat/rules/providers/muse-code.kdl` selects `openai-responses` at `https://api.meta.ai/v1`. It also records automatic tool choice, optional response storage, and Contributor models including Wonder.
+- `packages/ai/src/registry/oauth/muse-code.ts` uses device OAuth and exchanges the DCA token for a key at `https://api.meta.ai/muse-code/key`. `packages/ai/src/registry/muse-code.ts` supplies the key and API-version header.
+- `packages/ai/src/providers/openai-responses.ts` supplies client system instructions as `instructions`, or as developer messages according to the selected model's compatibility policy. It does not insert the Muse CLI system prompt. These provider paths do not start `muse serve` or use the Muse SDK.
+
+Version 0.4.0 adopts this architecture. Magpie's own gateway performs Chat/Responses/Messages conversion through `@ai-sdk/openai`; the plugin signs the resulting Responses request. Instructions, roles, message content, call ids and tool outputs retain their API representation. Tool names receive deterministic legal wire names and are restored on output. A description prefix identifies the original client tool to the model. Provider reasoning references and rejected metadata have explicit compatibility handling; they are not prompt rewriting.
+
+The plugin uses its own `magpie-muse/0.4.0` user-agent, never a fabricated Muse build. Authentication and inference destinations are restricted to Meta, redirects are refused, and an explicit loopback test backend accepts only dummy `test-only…` credentials. Credentials remain in Magpie's account store. There is no credential-file import, synchronization, shell execution or gateway MCP host on the default runtime path. The packaged provider has no runtime dependencies or install hooks.
+
+Live tests of the new architecture are in [TESTING.md](TESTING.md). The following earlier review describes the archived CLI implementation, not the default API backend.
+
+---
+
 # Community bridge review — 2026-11-13
 
 Reviewed [DylanLIiii/magpie-muse-bridge](https://github.com/DylanLIiii/magpie-muse-bridge) at commit [`aba1edbe1d5e975735a997c435fb24120733251a`](https://github.com/DylanLIiii/magpie-muse-bridge/tree/aba1edbe1d5e975735a997c435fb24120733251a), package 0.2.2, licensed MIT. This is a source review, not a certification of every release or its dependencies. No upstream runtime code was copied into this plugin, and it is not a runtime dependency.

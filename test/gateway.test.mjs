@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url"
 
 test("actual Magpie/Bun gateway converts Chat, Responses and Anthropic tool loops", { skip: !process.env.MAGPIE_TEST_BIN, timeout: 90000 }, async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "magpie-muse-gateway-test-"))
-  const project = path.resolve(fileURLToPath(new URL("..", import.meta.url)))
+  const project = fileURLToPath(new URL("../cli-plugin.mjs", import.meta.url))
   // Magpie treats CLI-backed plugins as subscriptions too: its global
   // MAGPIE_NO_ACCOUNTS switch would disable the provider under test.
   const env = { ...process.env, XDG_CONFIG_HOME: path.join(root, "config"), XDG_DATA_HOME: path.join(root, "data"), XDG_CACHE_HOME: path.join(root, "cache"), MAGPIE_NO_ACCOUNTS: "0" }

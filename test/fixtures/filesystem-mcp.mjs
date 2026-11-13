@@ -5,6 +5,7 @@ import path from "node:path"
 // Independent stdio MCP server. Only this client-side process reads the file;
 // neither the bridge nor the scripted Muse host executes the client tool.
 const root = fs.realpathSync(process.argv[2])
+if (process.env.MCP_STARTUP_MARKER) fs.appendFileSync(process.env.MCP_STARTUP_MARKER, "started\n")
 const lines = readline.createInterface({ input: process.stdin })
 lines.on("close", () => process.exit(0))
 lines.on("line", line => {

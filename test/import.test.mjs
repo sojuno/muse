@@ -111,7 +111,8 @@ test("authorizeImport: whole JSON in, fresh key out, mint metadata wins", async 
   assert.equal(meta.tier, "Ultra")
   assert.equal(calls.length, 1)
   const sent = JSON.parse(calls[0].init.body)
-  assert.equal(sent.dca_token, "dca:test-dca-token")
+  assert.deepEqual(sent, {})
+  assert.equal(new Headers(calls[0].init.headers).get("authorization"), "Bearer dca:test-dca-token")
 })
 
 test("authorizeImport: file metadata fills what the mint response does not say", async () => {

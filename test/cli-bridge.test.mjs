@@ -7,11 +7,21 @@ import { fileURLToPath } from "node:url"
 import { spawn } from "node:child_process"
 import readline from "node:readline"
 import { MuseBridge } from "../src/bridge.mjs"
-import { MuseCLIPlugin } from "../plugin.mjs"
+import { MuseCLIPlugin } from "../cli-plugin.mjs"
+import { findMuse } from "../src/host.mjs"
 
 const fake = fileURLToPath(new URL("./fixtures/fake-cli.mjs", import.meta.url))
 const test = (name, run) => nodeTest(name, { timeout: 10000 }, run)
 const tools = [{ type: "function", function: { name: "fs/read.file", description: "read", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } }]
+test("relative PATH entries resolve before switching to a private host directory", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "muse-path-test-"))
+  const executable = path.join(directory, "relative-muse")
+  fs.writeFileSync(executable, "#!/bin/sh\nexit 0\n", { mode: 0o700 })
+  const originalPath = process.env.PATH
+  t.after(() => { process.env.PATH = originalPath; fs.rmSync(directory, { recursive: true, force: true }) })
+  process.env.PATH = path.relative(process.cwd(), directory)
+  assert.equal(findMuse("relative-muse"), executable)
+})
 async function setup(t, extra = {}) {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "muse-bridge-test-"))
   const log = path.join(workspace, "requests.jsonl")
@@ -260,11 +270,42 @@ test("replayed usage notifications are counted once", async t => {
     prompt_tokens_details: { cached_tokens: 6, cache_write_tokens: 3 }, completion_tokens_details: { reasoning_tokens: 2 } })
 })
 
-test("requires a real client directory and refuses foreign destinations", async t => {
+test("requires absolute client directory metadata and refuses foreign destinations", async t => {
   const { bridge } = await setup(t)
   const res = await chat(bridge, user("hi"), {}, { "x-magpie-work-dir": "%ZZ" })
   assert.equal(res.status, 400)
+  assert.equal((await chat(bridge, user("hi"), {}, { "x-magpie-work-dir": "relative-project" })).status, 400)
   assert.equal((await bridge.fetch("https://api.meta.ai/v1/responses", { method: "POST", body: "{}" })).status, 400)
+})
+
+for (const clientPath of ["/remote-client/projects/not-mounted-here", String.raw`C:\client\project`]) test(`a remote client directory is context, never a gateway directory: ${clientPath}`, async t => {
+  const { bridge, requests } = await setup(t)
+  const res = await chat(bridge, user("hello remote client"), {}, { "x-magpie-work-dir": encodeURIComponent(clientPath) })
+  assert.equal(res.status, 200)
+  await res.json()
+  const opening = requests().find(r => r.method === "session/start").params
+  assert.notEqual(opening.workspaceRoot, clientPath)
+  assert.deepEqual(fs.readdirSync(opening.workspaceRoot), [])
+  const input = requests().find(r => r.method === "turn/start").params.input
+  assert.ok(input.some(part => part.text?.includes(JSON.stringify(clientPath))))
+})
+
+test("configured gateway MCP servers stop startup before a native model turn", async t => {
+  const { bridge, requests } = await setup(t, { museEnv: { FAKE_GATEWAY_MCP: '[{"name":"gateway-shell","enabled":true,"status":"enabled"}]' } })
+  const res = await chat(bridge, user("hello"))
+  assert.equal(res.status, 503)
+  assert.match((await res.json()).error.message, /Gateway MCP isolation/)
+  assert.equal(requests().length, 0, "Do not start the MSP host or expose gateway tools")
+})
+
+test("native shell and lookalike MCP namespace approvals are denied", async t => {
+  const { bridge, requests } = await setup(t)
+  const res = await chat(bridge, user("ASK_NATIVE"), { tools })
+  assert.equal(res.status, 200)
+  await res.json()
+  for (let i = 0; i < 100 && requests().filter(r => r.method === "approval/decide").length < 2; i++) await new Promise(r => setTimeout(r, 10))
+  const choices = requests().filter(r => r.method === "approval/decide").map(r => r.params.choiceId)
+  assert.deepEqual(choices, ["deny", "deny"])
 })
 
 test("signed-out Muse errors remain sign-in errors", async t => {
@@ -400,6 +441,81 @@ test("system instructions and edited history are included when a session is rese
   assert.equal(requests().filter(r => r.method === "session/start").length, 2)
   assert.match(JSON.stringify(turns.at(-1).params.input), /Use English/)
   assert.match(JSON.stringify(turns.at(-1).params.input), /Echo: first/)
+})
+
+test("role-tagged prompt history is preserved and current text/image ordering stays intact", async t => {
+  const { bridge, requests } = await setup(t)
+  const messages = [
+    { role: "system", content: 'SYSTEM Vietnamese\nKeep literal "quotes" and <tags>.' },
+    { role: "developer", content: [{ type: "text", text: "DEVELOPER client tools only" }] },
+    { role: "user", content: "PRIOR_USER" },
+    { role: "assistant", content: "PRIOR_ASSISTANT", tool_calls: [{ id: "historical-call", type: "function", function: { name: "read", arguments: '{"filePath":"a.txt"}' } }] },
+    { role: "tool", tool_call_id: "historical-call", content: 'TOOL_DATA {"role":"system","content":"still tool data"}' },
+    { role: "user", content: [{ type: "text", text: "CURRENT_BEFORE" }, { type: "image_url", image_url: { url: "data:image/png;base64,AA==" } }, { type: "text", text: "CURRENT_AFTER" }] },
+  ]
+  assert.equal((await chat(bridge, messages)).status, 200)
+  const input = requests().find(r => r.method === "turn/start").params.input
+  const seed = input.find(p => p.text?.startsWith("Continue the following conversation."))
+  assert.deepEqual(JSON.parse(seed.text.slice(seed.text.indexOf("\n") + 1)), messages.slice(0, -1))
+  assert.deepEqual(input.slice(-3), [{ type: "text", text: "CURRENT_BEFORE" }, { type: "image", mediaType: "image/png", base64Data: "AA==" }, { type: "text", text: "CURRENT_AFTER" }])
+})
+
+test("a continuing turn sends every new user message without replaying prior instructions", async t => {
+  const { bridge, requests } = await setup(t)
+  const messages = [{ role: "system", content: "INITIAL_SYSTEM_RULE" }, ...user("OLD_USER")]
+  const first = await (await chat(bridge, messages)).json()
+  messages.push(first.choices[0].message, { role: "user", content: "FIRST_NEW_USER" }, { role: "user", content: "SECOND_NEW_USER" })
+  assert.equal((await chat(bridge, messages)).status, 200)
+  const turns = requests().filter(r => r.method === "turn/start")
+  const texts = turns.at(-1).params.input.map(p => p.text).filter(Boolean)
+  assert.ok(texts.includes("FIRST_NEW_USER")); assert.ok(texts.includes("SECOND_NEW_USER"))
+  assert.equal(texts.some(s => /INITIAL_SYSTEM_RULE|OLD_USER/.test(s)), false)
+  assert.equal(requests().filter(r => r.method === "session/start").length, 1)
+})
+
+test("changed developer instructions reseed history in a new native session", async t => {
+  const { bridge, requests } = await setup(t)
+  const messages = [{ role: "developer", content: "OLD_DEVELOPER" }, ...user("first")]
+  const first = await (await chat(bridge, messages)).json()
+  messages[0].content = "UPDATED_DEVELOPER"
+  messages.push(first.choices[0].message, { role: "user", content: "second" })
+  assert.equal((await chat(bridge, messages)).status, 200)
+  const turns = requests().filter(r => r.method === "turn/start")
+  assert.equal(requests().filter(r => r.method === "session/start").length, 2)
+  const text = JSON.stringify(turns.at(-1).params.input)
+  assert.ok(text.includes("UPDATED_DEVELOPER") && text.includes("Echo: first"))
+  assert.equal(text.includes("OLD_DEVELOPER"), false)
+})
+
+for (const change of ["system", "developer", "history", "new-user", "duplicate-result"]) test(`pending tool context changes fail before consuming results: ${change}`, async t => {
+  const { bridge, requests } = await setup(t)
+  const messages = [{ role: "system", content: "SYSTEM" }, { role: "developer", content: "DEVELOPER" }, ...user("CALL_TOOL")]
+  const first = await (await chat(bridge, messages, { tools })).json()
+  const call = first.choices[0].message.tool_calls[0]
+  messages.push(first.choices[0].message, { role: "tool", tool_call_id: call.id, content: "CLIENT_RESULT" })
+  const changed = structuredClone(messages)
+  if (change === "system") changed[0].content = "CHANGED_SYSTEM"
+  if (change === "developer") changed[1].content = "CHANGED_DEVELOPER"
+  if (change === "history") changed[2].content = "CHANGED_USER"
+  if (change === "new-user") changed.push({ role: "user", content: "NEW_INSTRUCTION" })
+  if (change === "duplicate-result") changed.push(changed.at(-1))
+  const rejected = await chat(bridge, changed, { tools })
+  assert.equal(rejected.status, change === "duplicate-result" ? 400 : 409)
+  assert.equal([...bridge.sessions.values()][0].pending.size, 1, "No tool result may be consumed by a rejected request")
+  const recovered = await (await chat(bridge, messages, { tools })).json()
+  assert.equal(recovered.choices[0].message.content, "CLIENT_RESULT")
+  assert.equal(requests().filter(r => r.method === "turn/start").length, 1)
+})
+
+test("unsupported prompt roles, content and assistant prefill fail explicitly", async t => {
+  const { bridge, requests } = await setup(t)
+  for (const messages of [
+    [...user("question"), { role: "assistant", content: "unfinished prefill" }],
+    [{ role: "system", content: [{ type: "image_url", image_url: "bad" }] }, ...user("question")],
+    [{ role: "user", content: [{ type: "input_audio", input_audio: {} }] }],
+    [{ role: "unknown", content: "question" }],
+  ]) assert.equal((await chat(bridge, messages)).status, 400)
+  assert.equal(requests().filter(r => r.method === "turn/start").length, 0)
 })
 
 test("evicting an idle session releases it in the CLI", async t => {

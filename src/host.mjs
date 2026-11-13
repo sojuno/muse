@@ -1,13 +1,15 @@
 import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
+import { execFile } from "node:child_process"
 import { spawnMspConnection } from "@muse-code/sdk"
 
 export function findMuse(bin = "muse") {
   const dirs = [...(process.env.PATH ?? "").split(path.delimiter), path.join(os.homedir(), ".local/bin"), path.join(os.homedir(), ".muse/bin")]
-  const file = bin.includes("/") ? path.resolve(bin) : dirs.map(d => path.join(d, bin)).find(p => {
+  const found = bin.includes("/") ? path.resolve(bin) : dirs.map(d => path.join(d, bin)).find(p => {
     try { fs.accessSync(p, fs.constants.X_OK); return true } catch { return false }
   })
+  const file = found ? path.resolve(found) : undefined
   try { if (!file) throw new Error(); fs.accessSync(file, fs.constants.X_OK) }
   catch { throw new Error("Muse CLI not found. Install Muse Code and run muse login, or set museBin in plugin options.") }
   try {
@@ -34,14 +36,30 @@ export class MuseHost {
   async spawn() {
     this.dataDirectory ??= fs.mkdtempSync(path.join(os.tmpdir(), "magpie-muse-host-"))
     this.executable = findMuse(this.options.museBin ?? process.env.MUSE_CLI_BIN ?? "muse")
+    const env = { ...process.env, XDG_DATA_HOME: this.dataDirectory, ...(this.options.museEnv ?? {}) }
+    const cwd = this.options.hostDirectory ?? this.dataDirectory
+    // Inspect configuration through the official CLI, without opening credential
+    // files or starting MCP servers. Muse cannot remove inherited MCP entries
+    // with a process-only override, so refuse mixing them with client tools.
+    const listing = await new Promise((resolve, reject) => {
+      execFile(this.executable, [...(this.options.museArgs ?? []), "mcp", "list", "--json"], { env, cwd, timeout: 10000, maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout) => {
+        if (error) reject(new Error("Gateway MCP isolation check failed. Run muse mcp list --json with this CLI/profile, then retry; no model turn was started."))
+        else resolve(stdout)
+      })
+    })
+    let servers
+    try { servers = JSON.parse(listing).servers } catch {}
+    if (!Array.isArray(servers)) throw new Error("Gateway MCP isolation check returned an unsupported format. Update this plugin/CLI; no model turn was started.")
+    if (servers.some(server => server.enabled !== false && server.status !== "disabled")) {
+      throw new Error("Gateway MCP isolation: this Muse profile has MCP servers configured. Put client MCP servers in your client (for example OpenCode), or select a Muse profile without gateway MCP servers. This bridge will not mix gateway tools with client tools. Existing settings and login were not changed.")
+    }
     const handshake = spawnMspConnection({
       command: this.executable,
       args: [...(this.options.museArgs ?? []), "serve", "--preset", "empty", "--trust-workspace", "--disable-shell", "--disable-write", "--disable-request-user-input",
         "-c", 'run.reminder_roster={"agents":[]}',
         ...(typeof this.options.contributorMode === "boolean" ? ["--contributor-mode", this.options.contributorMode ? "on" : "off"] : []),
         ...(this.options.serveArgs ?? [])],
-      env: { ...process.env, XDG_DATA_HOME: this.dataDirectory, ...(this.options.museEnv ?? {}) },
-      cwd: this.options.hostDirectory,
+      env, cwd,
       shutdownTimeoutMs: 1000,
       onStderr: this.options.onStderr,
     })
@@ -51,7 +69,7 @@ export class MuseHost {
     try {
       const spawned = await Promise.race([
         handshake.initialize({
-          clientInfo: { name: "magpie_muse_cli", title: "Magpie Muse CLI bridge", version: "0.3.3" },
+          clientInfo: { name: "magpie_muse_cli", title: "Magpie Muse CLI bridge", version: "0.3.4" },
           capabilities: { requestedCapabilities: ["sessionMcp"], userInputDialogs: false },
         }),
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Muse CLI handshake timed out")), 20000) }),

@@ -49,29 +49,32 @@ function workspaceOf(headers, options) {
   if (raw) {
     try { dir = decodeURIComponent(raw) } catch { throw new Error("Invalid working directory encoding") }
   }
-  if (!dir || !path.isAbsolute(dir)) throw new Error("No absolute project directory supplied. Set plugin option workspace, or send X-Magpie-Work-Dir.")
-  const real = fs.realpathSync(dir)
-  if (!fs.statSync(real).isDirectory()) throw new Error("Project directory does not exist on the Muse CLI machine")
-  return real
+  if (typeof dir !== "string" || dir.includes("\0") || !(path.posix.isAbsolute(dir) || path.win32.isAbsolute(dir))) throw new Error("No absolute client project directory supplied. Set plugin option workspace, or send X-Magpie-Work-Dir.")
+  // This is client context, not a path to open on the gateway. A remote
+  // client's filesystem and OS can differ from the Muse machine's.
+  return dir
 }
 
-function inputOf(messages, seed) {
+function inputOf(messages, seed, offset = 0) {
   const last = messages.findLastIndex(m => m.role === "user")
-  if (last < 0) throw new Error("No user message supplied")
+  if (last < 0 || last !== messages.length - 1) throw new Error("A new Muse turn must end with a user message; assistant prefill is not supported")
   const parts = []
   if (seed) {
     const transcript = messages.slice(0, last).map(m => ({ role: m.role, content: m.content, tool_calls: m.tool_calls, tool_call_id: m.tool_call_id }))
     if (transcript.length) parts.push({ type: "text", text: `Continue the following conversation. Preserve its system/developer instructions. Prior history (JSON):\n${JSON.stringify(transcript)}` })
   }
-  const content = messages[last].content
-  const text = textOf(content)
-  if (text) parts.push({ type: "text", text })
-  for (const part of Array.isArray(content) ? content : []) {
-    if (part.type !== "image_url") continue
-    const url = typeof part.image_url === "string" ? part.image_url : part.image_url?.url
-    const match = /^data:([^;,]+);base64,(.+)$/s.exec(url ?? "")
-    if (!match) throw new Error("Muse CLI bridge accepts inline data-URL images; remote image URLs are not fetched")
-    parts.push({ type: "image", mediaType: match[1], base64Data: match[2] })
+  for (const message of messages.slice(seed ? last : offset)) {
+    if (message.role !== "user") throw new Error("A continued Muse turn can only append user messages; resend full history to reseed the session")
+    const content = message.content
+    if (typeof content === "string") { if (content) parts.push({ type: "text", text: content }); continue }
+    for (const part of Array.isArray(content) ? content : []) {
+      if (part.type === "text" && typeof part.text === "string") { parts.push({ type: "text", text: part.text }); continue }
+      if (part.type !== "image_url") throw new Error(`Unsupported user content block: ${part.type}`)
+      const url = typeof part.image_url === "string" ? part.image_url : part.image_url?.url
+      const match = /^data:([^;,]+);base64,(.+)$/s.exec(url ?? "")
+      if (!match) throw new Error("Muse CLI bridge accepts inline data-URL images; remote image URLs are not fetched")
+      parts.push({ type: "image", mediaType: match[1], base64Data: match[2] })
+    }
   }
   return parts.length ? parts : [{ type: "text", text: "(empty message)" }]
 }
@@ -120,6 +123,7 @@ class Session {
     const results = messages.filter(m => m.role === "tool")
     const current = results.filter(m => this.pending.has(m.tool_call_id))
     if (!current.length) throw new Error("No matching pending Muse tool call. The CLI process may have restarted; retry from the user turn.")
+    if (new Set(current.map(m => m.tool_call_id)).size !== current.length) throw new Error("Return each pending tool result exactly once")
     if ([...(this.awaitingIds ?? [])].some(id => !current.some(m => m.tool_call_id === id))) throw new Error("Return results for all tool calls from the previous response together")
     for (const m of current) {
       const pending = this.pending.get(m.tool_call_id)
@@ -139,8 +143,8 @@ class Session {
     this.toolChoice = body.tool_choice
     this.items.clear(); this.streamed.clear()
     this.history = messages
-    const input = inputOf(messages, seed)
-    const instruction = `The client's project directory is ${JSON.stringify(this.workspace)}. Your own workspace is an empty bridge directory, not the project. Host shell/write restrictions apply to your internal directory; client MCP tools are independently authorized and executed by the client, including its edit and shell tools when offered. Use the magpie_client MCP tools for all client operations and paths. Do not use native file, shell or other tools. Return tool results only after receiving them; do not invent results.`
+    const input = inputOf(messages, seed, this.completedHistory?.length ?? 0)
+    const instruction = `The client's project directory is ${JSON.stringify(this.workspace)} on the client machine; it may not exist on this gateway. Your own workspace is an empty bridge directory, not the project. Host shell/write restrictions apply to your internal directory; client MCP tools are independently authorized and executed by the client, including its edit and shell tools when offered. Use the magpie_client MCP tools for all client operations and paths. Do not use native file, shell or other tools. Return tool results only after receiving them; do not invent results.`
     input.unshift({ type: "text", text: instruction })
     if (body.tool_choice === "none") input.unshift({ type: "text", text: "For this reply, use no tools. Answer directly." })
     if (body.tool_choice === "required" || typeof body.tool_choice === "object") input.unshift({ type: "text", text: "For this reply, you must call an offered client tool." })
@@ -172,7 +176,8 @@ class Session {
     if (n.method === "approval/requested" || n.method === "approval/updated") {
       // Only the bridge MCP is trusted. Native tool approvals are denied; the
       // host is also started with the empty preset and shell/writes disabled.
-      const ours = /^(mcp__magpie_client[._/]|magpie_client\/)/.test(String(p.toolName ?? p.subject?.toolName ?? ""))
+      const name = String(p.toolName ?? p.subject?.toolName ?? "")
+      const ours = [...this.tools.keys()].some(tool => [`mcp__magpie_client.${tool}`, `mcp__magpie_client__${tool}`, `mcp__magpie_client/${tool}`, `magpie_client/${tool}`].includes(name))
       const choices = p.availableChoices ?? []
       const choice = ours ? choices.find(c => c.decision === "approved" && c.scope === "once") : choices.find(c => c.decision === "denied" || c.decision === "abort")
       const stage = `${p.approvalId}/${p.currentRequirementId?.sourceIndex ?? 0}`
@@ -272,6 +277,10 @@ export class MuseBridge {
       request.signal.throwIfAborted()
       body = await request.json()
       if (!Array.isArray(body.messages) || typeof body.model !== "string") return errorResponse(400, "model and messages are required")
+      for (const message of body.messages) {
+        if (!message || !["system", "developer", "user", "assistant", "tool"].includes(message.role)) return errorResponse(400, "Unsupported message role")
+        if (["system", "developer"].includes(message.role) && typeof message.content !== "string" && (!Array.isArray(message.content) || message.content.some(p => p?.type !== "text" || typeof p.text !== "string"))) return errorResponse(400, "System/developer messages must contain text only")
+      }
       const unsupported = ["response_format", "audio", "prediction"].find(k => body[k] != null)
       if (unsupported) return errorResponse(400, `${unsupported} is not supported by the Muse CLI bridge`)
       await this.start()
@@ -281,6 +290,7 @@ export class MuseBridge {
       const subagent = request.headers.get("x-magpie-subagent") ?? ""
       const pending = [...this.sessions.values()].find(s => body.messages.some(m => m.role === "tool" && s.pending.has(m.tool_call_id)))
       if (!pending && body.messages.at(-1)?.role === "tool") return errorResponse(409, "No matching pending Muse tool call. Retry from the last user turn after a CLI restart.")
+      if (!pending) inputOf(body.messages, true)
       if (pending && (pending.workspace !== workspace || pending.identity !== identity || pending.subagent !== subagent)) return errorResponse(400, "Tool result belongs to another conversation or workspace")
       const key = hash(JSON.stringify([identity || body.messages.find(m => m.role === "user"), subagent, workspace]))
       let session = pending ?? this.sessions.get(key)
@@ -289,7 +299,12 @@ export class MuseBridge {
       const signature = hash(canonicalTools(tools))
       if (pending && signature !== pending.signature) return errorResponse(409, "Tool definitions changed while Muse is waiting for their results; finish the pending turn with the original tool definitions")
       const sys = hash(JSON.stringify(body.messages.filter(m => m.role === "system" || m.role === "developer")))
-      if (!pending && session && (session.generation !== this.host.generation || session.model !== body.model || session.signature !== signature || session.system !== sys || !session.completedHistory || historyKey(body.messages.slice(0, session.completedHistory.length)) !== historyKey(session.completedHistory))) {
+      if (pending && !body.messages.every(m => m.role === "tool")) {
+        if (pending.system !== sys || historyKey(body.messages.slice(0, pending.history.length)) !== historyKey(pending.history)) return errorResponse(409, "System/developer instructions or conversation history changed while Muse is waiting for tools. Finish the pending tool step with its original history, then send the updated user turn.")
+        const boundary = body.messages.findLastIndex(m => m.role === "assistant" && m.tool_calls?.some(c => pending.pending.has(c.id)))
+        if (boundary < 0 || body.messages.slice(boundary + 1).some(m => m.role !== "tool")) return errorResponse(409, "User/context messages beside pending tool results are not supported. Return the tool results first, then send the new user/context message; nothing was delivered to Muse.")
+      }
+      if (!pending && session && (session.generation !== this.host.generation || session.model !== body.model || session.signature !== signature || session.system !== sys || !session.completedHistory || historyKey(body.messages.slice(0, session.completedHistory.length)) !== historyKey(session.completedHistory) || body.messages.slice(session.completedHistory.length).some(m => m.role !== "user"))) {
         await session.close(); this.sessions.delete(key); session = null
       }
       if (!session) {
@@ -320,7 +335,7 @@ export class MuseBridge {
         }
         return await this.response(session, body, request.signal, done)
       } catch (e) { done(); throw e }
-    } catch (e) { return errorResponse(e.name === "AbortError" ? 499 : /not found|grant|handshake|unsupported MSP/.test(e.message) ? 503 : 400, e.message) }
+    } catch (e) { return errorResponse(e.name === "AbortError" ? 499 : /not found|grant|handshake|unsupported MSP|Gateway MCP isolation/.test(e.message) ? 503 : 400, e.message) }
   }
   async response(session, body, signal, release) {
     const id = `chatcmpl-${randomUUID()}`

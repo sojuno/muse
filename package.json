@@ -1,18 +1,22 @@
 {
-  "description": "Magpie provider backed by the official Muse CLI with client tools bridged over MCP",
+  "description": "Magpie provider for the Muse subscription Responses API, with client-owned tools and native prompts",
   "exports": {
     ".": "./plugin.mjs"
   },
   "files": [
     "plugin.mjs",
-    "src/",
-    "bin/",
+    "oauth.mjs",
+    "src/api-auth.mjs",
+    "src/api-provider.mjs",
+    "src/api-transport.mjs",
+    "src/responses-compat.mjs",
+    "src/pricing.mjs",
     "README.md",
     "LICENSE",
     "icon.svg",
-    "LEGACY-OAUTH.md",
     "PRICING.md",
     "TESTING.md",
+    "CLI-TESTING.md",
     "UPSTREAM-REVIEW.md"
   ],
   "keywords": [
@@ -28,24 +32,21 @@
     "icon": "https://raw.githubusercontent.com/sojuno/muse/main/icon.svg"
   },
   "main": "./plugin.mjs",
-  "name": "magpie-muse-cli",
+  "name": "magpie-muse",
   "repository": {
     "type": "git",
     "url": "https://github.com/sojuno/muse"
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "doctor": "node bin/muse-cli.mjs doctor"
+    "doctor": "magpie provider test muse"
   },
   "type": "module",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "engines": {
     "node": ">=22"
   },
-  "bin": {
-    "magpie-muse-cli": "./bin/muse-cli.mjs"
-  },
-  "dependencies": {
+  "devDependencies": {
     "@muse-code/sdk": "1.4.15"
   }
 }
