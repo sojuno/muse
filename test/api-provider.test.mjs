@@ -170,3 +170,65 @@ test("API authentication distinguishes expired grants from transient renewal fai
     assert.equal(response.headers.get("X-Magpie-Sign-In"), expired ? "expired" : "kept")
   }
 })
+
+test("toolNames native sends names the API accepts unchanged; rejected or alias-like names are still aliased", () => {
+  const tools = [{ type: "function", name: "bash", description: "Run a shell command." }, { type: "function", name: "mcp__filesystem__read_file" },
+    { type: "function", name: "fs/read", description: "Read." }, { type: "function", name: "client_lookup" }, { type: "function", name: "x".repeat(65) }]
+  const copy = structuredClone(tools)
+  const out = prepareAPIRequest({ input: [{ type: "function_call", call_id: "c1", name: "bash", arguments: "{}" }, { type: "function_call", call_id: "c2", name: "fs/read", arguments: "{}" }], tools }, { toolNames: "native" })
+  assert.deepEqual(out.body.tools[0], tools[0])
+  assert.deepEqual(out.body.tools[1], tools[1])
+  for (const i of [2, 3, 4]) assert.match(out.body.tools[i].name, /^client_[a-f0-9]{40}$/)
+  assert.equal(out.body.tools[2].description, 'Client tool "fs/read". Read.')
+  assert.equal(out.body.tools[3].description, 'Client tool "client_lookup".')
+  assert.equal(out.body.input[0].name, "bash")
+  assert.equal(out.body.input[1].name, out.body.tools[2].name)
+  for (const [i, tool] of tools.entries()) assert.equal(out.names.get(out.body.tools[i].name), tool.name)
+  assert.equal(new Set(out.body.tools.map(tool => tool.name)).size, tools.length)
+  assert.deepEqual(tools, copy)
+  const hashed = prepareAPIRequest({ tools: [tools[0]] })
+  assert.match(hashed.body.tools[0].name, /^client_[a-f0-9]{40}$/)
+  assert.equal(hashed.body.tools[0].description, 'Client tool "bash". Run a shell command.')
+  assert.throws(() => prepareAPIRequest({}, { toolNames: "plain" }), /toolNames/)
+})
+
+test("reasoningReplay drop sends no earlier reasoning and keeps messages, tool calls and tool results", async () => {
+  const tools = [{ type: "function", name: "read" }]
+  const input = [{ role: "user", content: "U" }, { type: "reasoning", id: "rs_1", encrypted_content: "sealed", summary: [] },
+    { type: "function_call", call_id: "c1", name: "read", arguments: "{}" }, { type: "function_call_output", call_id: "c1", output: "OUT" }]
+  assert.deepEqual(prepareAPIRequest({ input, tools }, { toolNames: "native" }).body.input, input)
+  assert.deepEqual(prepareAPIRequest({ input, tools }, { toolNames: "native", reasoningReplay: "drop" }).body.input, input.filter(item => item.type !== "reasoning"))
+  const aliased = prepareAPIRequest({ input, tools }, { reasoningReplay: "drop" }).body
+  assert.deepEqual(aliased.input.map(item => item.type ?? item.role), ["user", "function_call", "function_call_output"])
+  assert.equal(aliased.input[1].name, aliased.tools[0].name)
+  assert.throws(() => prepareAPIRequest({}, { reasoningReplay: "sometimes" }), /reasoningReplay/)
+  const sent = []
+  const hooks = await MusePlugin({}, { toolNames: "native", reasoningReplay: "drop", request: async (_url, init) => { sent.push(JSON.parse(init.body)); return Response.json({ output: [{ type: "function_call", name: "read", call_id: "c2" }] }) } })
+  const loader = await hooks.auth.loader(async () => ({ type: "api", key: "test-only-key" }))
+  const response = await loader.fetch(META_API_BASE + "/responses", { method: "POST", body: JSON.stringify({ input, tools }) })
+  assert.equal((await response.json()).output[0].name, "read")
+  assert.equal(sent.length, 1)
+  assert.deepEqual(sent[0].input, input.filter(item => item.type !== "reasoning"))
+  assert.equal(sent[0].tools[0].name, "read")
+  await hooks.dispose()
+  await assert.rejects(MusePlugin({}, { toolNames: "plain" }), /toolNames/)
+  await assert.rejects(MusePlugin({}, { reasoningReplay: "sometimes" }), /reasoningReplay/)
+})
+
+test("instructionsAs message sends the system text as the first input message and leaves instructions empty", async () => {
+  const input = [{ role: "user", content: "U" }]
+  const kept = prepareAPIRequest({ instructions: "SYSTEM", input })
+  assert.equal(kept.body.instructions, "SYSTEM"); assert.deepEqual(kept.body.input, input)
+  const moved = prepareAPIRequest({ instructions: "SYSTEM", input }, { instructionsAs: "message" })
+  assert.equal(moved.body.instructions, ""); assert.deepEqual(moved.body.input, [{ role: "system", content: "SYSTEM" }, ...input])
+  assert.deepEqual(prepareAPIRequest({ instructions: "SYSTEM", input: "PLAIN" }, { instructionsAs: "message" }).body.input, [{ role: "system", content: "SYSTEM" }, { role: "user", content: "PLAIN" }])
+  const none = prepareAPIRequest({ input }, { instructionsAs: "message" })
+  assert.equal(none.body.instructions, ""); assert.deepEqual(none.body.input, input)
+  assert.throws(() => prepareAPIRequest({}, { instructionsAs: "developer" }), /instructionsAs/)
+  const sent = []
+  const hooks = await MusePlugin({}, { instructionsAs: "message", reasoningReplay: "drop", request: async (_url, init) => { sent.push(JSON.parse(init.body)); return Response.json({ output: [] }) } })
+  const loader = await hooks.auth.loader(async () => ({ type: "api", key: "test-only-key" }))
+  await loader.fetch(META_API_BASE + "/responses", { method: "POST", body: JSON.stringify({ instructions: "SYSTEM", input }) })
+  assert.equal(sent[0].instructions, ""); assert.deepEqual(sent[0].input, [{ role: "system", content: "SYSTEM" }, ...input])
+  await hooks.dispose()
+})

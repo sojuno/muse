@@ -67,6 +67,21 @@ Magpie accepts OpenAI Chat Completions, Responses and Anthropic Messages, transl
 
 Small live tests verified separate system/developer/user instructions on Spark and Wonder in both lanes. They do not establish every model's instruction-following behavior. See [TESTING.md](TESTING.md) for exact test scope.
 
+## Matching a stateless Chat Completions route
+
+Three options, all off by default, change what reaches the model. Together they make a request through this plugin
+read like the same Chat Completions request sent to Meta's public API by a client that returns no reasoning items.
+Set them in the installed plugin's Options, for example `{ "toolNames": "native", "reasoningReplay": "drop", "instructionsAs": "message" }`.
+
+| Option | Default | Other value |
+| --- | --- | --- |
+| `toolNames` | `"hashed"`: every function name is sent under a `client_…` alias, with the original name in its description | `"native"`: a name the API accepts (`A-Z a-z 0-9 _ -`, at most 64 characters, not starting with `client_`) is sent exactly as declared, description unchanged; any other name is still aliased |
+| `reasoningReplay` | `"keep"`: sealed reasoning items in the request are sent | `"drop"`: no earlier reasoning item is sent; each request carries only the conversation's messages, tool calls and tool results |
+| `instructionsAs` | `"instructions"`: the system text stays in `instructions` | `"message"`: it is sent as the first message of `input` (role `system`) and `instructions` is left empty |
+
+Aliases are restored in streamed and buffered responses under either `toolNames` value. Check `"native"` once with a
+signed-in account before relying on it: whether the service accepts every plain name has not been tested live.
+
 ## Token usage
 
 Counts come from **Meta's response**, not a local estimate. They pass through to client responses and Magpie's Usage ledger.

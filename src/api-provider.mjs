@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { createAPIAuth, API_USER_AGENT } from "./api-auth.mjs"
-import { createAPITransport, META_API_BASE, validateAPIBase } from "./api-transport.mjs"
+import { createAPITransport, META_API_BASE, validateAPIBase, validateAPIOptions } from "./api-transport.mjs"
 import { metadata, AuthError } from "../oauth.mjs"
 import { parseSubscriptionUsage, subscriptionWindows } from "./responses-compat.mjs"
 import { modelPrice } from "./pricing.mjs"
@@ -15,6 +15,7 @@ const accountKey = auth => createHash("sha256").update(auth.access).digest("hex"
 export async function createAPIProvider(input = {}, options = {}) {
   const request = typeof options.request === "function" ? options.request : fetch
   const baseURL = validateAPIBase(options.localTestBackend ? options.baseURL : META_API_BASE, options.localTestBackend)
+  const requestOptions = validateAPIOptions({ toolNames: options.toolNames, reasoningReplay: options.reasoningReplay, instructionsAs: options.instructionsAs })
   const auth = createAPIAuth(input.client, request)
   const usage = new Map()
   const discoveries = new Map()
@@ -76,7 +77,7 @@ export async function createAPIProvider(input = {}, options = {}) {
       ],
       async loader(getAuth) {
         return { baseURL, apiKey: "muse-api-private", fetch: createAPITransport({
-          credential: () => credential(getAuth), renew: rejected => credential(getAuth, rejected), request, baseURL, localTestBackend: options.localTestBackend,
+          credential: () => credential(getAuth), renew: rejected => credential(getAuth, rejected), request, baseURL, localTestBackend: options.localTestBackend, ...requestOptions,
           onEvent(value, current) {
             const snapshot = value.type === "response.subscription_usage" ? parseSubscriptionUsage(value.subscription) : null
             if (snapshot) usage.set(accountKey(current), snapshot)

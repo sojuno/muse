@@ -15,15 +15,27 @@ const authFailure = error => {
   return Response.json({ error: { type: "muse_api_error", message: error instanceof AuthError ? error.message : "Muse credentials are temporarily unavailable; retry." } },
     { status: expired ? 401 : 503, headers: { "X-Magpie-Sign-In": expired ? "expired" : "kept" } })
 }
-const wireName = name => "client_" + createHash("sha256").update(name).digest("hex").slice(0, 40)
+// Every function name gets a deterministic alias by default. With `toolNames: "native"` a name the API accepts as
+// written is sent unchanged, description included, so the model reads the tool list the client declared; only a
+// name the API would reject, or one that could be taken for an alias, is still aliased.
+const API_NAME = /^[A-Za-z0-9_-]{1,64}$/
+const aliasName = name => "client_" + createHash("sha256").update(name).digest("hex").slice(0, 40)
+const TOOL_NAMES = new Set(["native", "hashed"]), REASONING_REPLAY = new Set(["keep", "drop"]), INSTRUCTIONS_AS = new Set(["instructions", "message"])
+export function validateAPIOptions({ toolNames = "hashed", reasoningReplay = "keep", instructionsAs = "instructions" } = {}) {
+  if (!TOOL_NAMES.has(toolNames)) throw new Error('Option toolNames must be "native" or "hashed"')
+  if (!REASONING_REPLAY.has(reasoningReplay)) throw new Error('Option reasoningReplay must be "keep" or "drop"')
+  if (!INSTRUCTIONS_AS.has(instructionsAs)) throw new Error('Option instructionsAs must be "instructions" or "message"')
+  return { toolNames, reasoningReplay, instructionsAs }
+}
 
-export function prepareAPIRequest(input) {
+export function prepareAPIRequest(input, options) {
+  const { toolNames, reasoningReplay, instructionsAs } = validateAPIOptions(options)
   const body = normalizeRequest(input)
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Expected a Responses request object")
   const names = new Map(), reverse = new Map(), declared = new Set()
   const register = name => {
     if (typeof name !== "string" || !name) throw new Error("Function tools require a name")
-    const wire = wireName(name)
+    const wire = toolNames === "native" && API_NAME.test(name) && !name.startsWith("client_") ? name : aliasName(name)
     names.set(name, wire); reverse.set(wire, name)
     return wire
   }
@@ -31,14 +43,23 @@ export function prepareAPIRequest(input) {
     if (tool.type !== "function") throw new Error("This bridge accepts client function tools. Connect MCP servers/resources/prompts in the client; hosted API tools are not implemented.")
     if (declared.has(tool.name)) throw new Error("Duplicate client tool name")
     declared.add(tool.name)
-    return { ...tool, name: register(tool.name), description: `Client tool ${JSON.stringify(tool.name)}.${tool.description ? " " + tool.description : ""}` }
+    const wire = register(tool.name)
+    // An aliased tool names its client tool in the description; an unchanged tool is sent exactly as declared.
+    return wire === tool.name ? { ...tool } : { ...tool, name: wire, description: `Client tool ${JSON.stringify(tool.name)}.${tool.description ? " " + tool.description : ""}` }
   })
   if (body.tool_choice != null && body.tool_choice !== "auto" && body.tool_choice !== "none") throw new Error("Meta supports automatic tool choice; required/named tool choice is not implemented")
   const history = Array.isArray(body.input) ? body.input.map(item => item?.type === "function_call" ? { ...item, name: names.get(item.name) ?? register(item.name) } : item) : body.input
   const { tool_choice: choice, ...rest } = body
   // No CLI system prompt is added. Instructions, roles, input contents, call ids
-  // and tool results retain their API representation; only wire names change.
-  return { body: dropBareReasoningItems({ ...rest, store: body.store ?? false, input: history, ...(body.tools ? { tools: choice === "none" ? [] : tools } : {}) }), names: reverse }
+  // and tool results retain their API representation; only aliased names change.
+  // `instructionsAs: "message"` sends the client's system text as the first message of the conversation, which is
+  // where it sits when a chat-completions request reaches Meta's public API, and leaves `instructions` empty.
+  const asMessage = instructionsAs === "message" && typeof body.instructions === "string" && body.instructions !== ""
+  const items = !asMessage ? history : [{ role: "system", content: body.instructions }, ...(Array.isArray(history) ? history : history == null ? [] : [{ role: "user", content: history }])]
+  const prepared = { ...rest, ...(asMessage ? { instructions: "" } : {}), store: body.store ?? false, input: items, ...(body.tools ? { tools: choice === "none" ? [] : tools } : {}) }
+  // `reasoningReplay: "drop"` sends no earlier reasoning item: the model then reads only the messages, tool calls
+  // and tool results of the conversation, as it does behind a client that returns no reasoning items.
+  return { body: reasoningReplay === "drop" ? dropAllReasoningItems(prepared) : dropBareReasoningItems(prepared), names: reverse }
 }
 
 function responseNames(value, names) {
@@ -83,14 +104,15 @@ export function transformAPIResponse(response, names, onEvent = () => {}) {
   return new Response(stream, { status: response.status, statusText: response.statusText, headers })
 }
 
-export function createAPITransport({ credential, renew, request = fetch, baseURL = META_API_BASE, localTestBackend = false, onEvent }) {
+export function createAPITransport({ credential, renew, request = fetch, baseURL = META_API_BASE, localTestBackend = false, onEvent, toolNames, reasoningReplay, instructionsAs }) {
   baseURL = validateAPIBase(baseURL, localTestBackend)
+  const requestOptions = validateAPIOptions({ toolNames, reasoningReplay, instructionsAs })
   const base = new URL(baseURL)
   return async (input, init) => {
     const req = new Request(input, init), url = new URL(req.url)
     if (url.origin !== base.origin || url.pathname !== base.pathname.replace(/\/$/, "") + "/responses" || req.method !== "POST") return errorResponse(400, "Refusing a foreign inference destination")
     let prepared
-    try { prepared = prepareAPIRequest(await req.json()) } catch (error) { return errorResponse(400, error.message) }
+    try { prepared = prepareAPIRequest(await req.json(), requestOptions) } catch (error) { return errorResponse(400, error.message) }
     req.signal.throwIfAborted()
     let auth, body = prepared.body
     try { auth = await credential() } catch (error) { req.signal.throwIfAborted(); return authFailure(error) }
