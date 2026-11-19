@@ -1,6 +1,6 @@
 # Magpie Muse
 
-Use a Muse subscription through Magpie's gateway. Version **0.4.0** calls Meta's **Responses API directly**, following the architecture used by [oh-my-pi](UPSTREAM-REVIEW.md). It does not require Muse CLI or the Muse SDK.
+Use a Muse subscription through Magpie's gateway. Since version **0.4.0** it calls Meta's **Responses API directly**, following the architecture used by [oh-my-pi](UPSTREAM-REVIEW.md). It does not require Muse CLI or the Muse SDK.
 
 ```text
 OpenCode / another client → Magpie → this plugin → Meta Responses API
