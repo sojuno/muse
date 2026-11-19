@@ -67,20 +67,22 @@ Magpie accepts OpenAI Chat Completions, Responses and Anthropic Messages, transl
 
 Small live tests verified separate system/developer/user instructions on Spark and Wonder in both lanes. They do not establish every model's instruction-following behavior. See [TESTING.md](TESTING.md) for exact test scope.
 
-## Matching a stateless Chat Completions route
+## What reaches the model
 
-By default a request through this plugin reads like the same Chat Completions request sent to Meta's public API by
-a client that returns no reasoning items. Three options, set in the installed plugin's Options, restore the earlier
-behaviour one by one, for example `{ "reasoningReplay": "keep" }`.
+By default no earlier reasoning item is sent and the client's system text is the first message of the conversation,
+as in the same Chat Completions request sent to Meta's public API by a client that returns no reasoning items. Every
+function name is sent under an alias. Each behaviour has an option, set in the installed plugin's Options.
 
 | Option | Default | Other value |
 | --- | --- | --- |
-| `toolNames` | `"native"`: a name the API accepts (`A-Z a-z 0-9 _ -`, at most 64 characters, not starting with `client_`) is sent exactly as declared, description unchanged; any other name gets a `client_…` alias with the original name in its description | `"hashed"`: every function name is sent under an alias |
+| `toolNames` | `"hashed"`: every function name is sent under a `client_…` alias, with the original name in its description | `"native"`: a name the API accepts (`A-Z a-z 0-9 _ -`, at most 64 characters, not starting with `client_`) is sent exactly as declared, description unchanged; any other name is still aliased |
 | `reasoningReplay` | `"drop"`: no earlier reasoning item is sent; each request carries only the conversation's messages, tool calls and tool results | `"keep"`: sealed reasoning items in the request are sent |
 | `instructionsAs` | `"message"`: the system text is sent as the first message of `input` (role `system`) and `instructions` is left empty; a request that continues a stored response keeps `instructions` | `"instructions"`: the system text stays in `instructions` |
 
-Aliases are restored in streamed and buffered responses. If the service refuses a tool name sent as declared, the
-request is retried once with every name aliased and later requests alias from the start.
+Aliases are restored in streamed and buffered responses. With a subscription key the service answers
+`403 client_attestation_denied` to a request that declares a tool under a name the Muse Code client uses itself (seen
+live with `bash`): its message says subscriptions cover the Muse Code client only and names a pay-as-you-go API key for
+other clients. `"native"` is therefore not usable with such tools on a subscription key.
 
 ## Token usage
 

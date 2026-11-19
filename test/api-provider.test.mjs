@@ -186,7 +186,7 @@ test("toolNames native sends names the API accepts unchanged; rejected or alias-
   for (const [i, tool] of tools.entries()) assert.equal(out.names.get(out.body.tools[i].name), tool.name)
   assert.equal(new Set(out.body.tools.map(tool => tool.name)).size, tools.length)
   assert.deepEqual(tools, copy)
-  const hashed = prepareAPIRequest({ tools: [tools[0]] }, { toolNames: "hashed" })
+  const hashed = prepareAPIRequest({ tools: [tools[0]] })
   assert.match(hashed.body.tools[0].name, /^client_[a-f0-9]{40}$/)
   assert.equal(hashed.body.tools[0].description, 'Client tool "bash". Run a shell command.')
   assert.throws(() => prepareAPIRequest({}, { toolNames: "plain" }), /toolNames/)
@@ -196,14 +196,14 @@ test("reasoningReplay drop sends no earlier reasoning and keeps messages, tool c
   const tools = [{ type: "function", name: "read" }]
   const input = [{ role: "user", content: "U" }, { type: "reasoning", id: "rs_1", encrypted_content: "sealed", summary: [] },
     { type: "function_call", call_id: "c1", name: "read", arguments: "{}" }, { type: "function_call_output", call_id: "c1", output: "OUT" }]
-  assert.deepEqual(prepareAPIRequest({ input, tools }, { reasoningReplay: "keep" }).body.input, input)
-  assert.deepEqual(prepareAPIRequest({ input, tools }).body.input, input.filter(item => item.type !== "reasoning"))
-  const aliased = prepareAPIRequest({ input, tools }, { toolNames: "hashed" }).body
+  assert.deepEqual(prepareAPIRequest({ input, tools }, { toolNames: "native", reasoningReplay: "keep" }).body.input, input)
+  assert.deepEqual(prepareAPIRequest({ input, tools }, { toolNames: "native" }).body.input, input.filter(item => item.type !== "reasoning"))
+  const aliased = prepareAPIRequest({ input, tools }).body
   assert.deepEqual(aliased.input.map(item => item.type ?? item.role), ["user", "function_call", "function_call_output"])
   assert.equal(aliased.input[1].name, aliased.tools[0].name)
   assert.throws(() => prepareAPIRequest({}, { reasoningReplay: "sometimes" }), /reasoningReplay/)
   const sent = []
-  const hooks = await MusePlugin({}, { toolNames: "native", reasoningReplay: "drop", request: async (_url, init) => { sent.push(JSON.parse(init.body)); return Response.json({ output: [{ type: "function_call", name: "read", call_id: "c2" }] }) } })
+  const hooks = await MusePlugin({}, { toolNames: "native", request: async (_url, init) => { sent.push(JSON.parse(init.body)); return Response.json({ output: [{ type: "function_call", name: "read", call_id: "c2" }] }) } })
   const loader = await hooks.auth.loader(async () => ({ type: "api", key: "test-only-key" }))
   const response = await loader.fetch(META_API_BASE + "/responses", { method: "POST", body: JSON.stringify({ input, tools }) })
   assert.equal((await response.json()).output[0].name, "read")
@@ -233,35 +233,17 @@ test("instructionsAs message sends the system text as the first input message an
   await hooks.dispose()
 })
 
-test("defaults read like a stateless Chat Completions request: plain names, no earlier reasoning, system text as a message", () => {
+test("defaults send no earlier reasoning and the system text as a message, with every tool name aliased", () => {
   const tools = [{ type: "function", name: "bash", description: "Run a shell command." }]
   const input = [{ role: "user", content: "U" }, { type: "reasoning", id: "rs_1", encrypted_content: "sealed", summary: [] }, { type: "function_call", call_id: "c1", name: "bash", arguments: "{}" }, { type: "function_call_output", call_id: "c1", output: "OUT" }]
   const out = prepareAPIRequest({ instructions: "SYSTEM", input, tools }).body
-  assert.deepEqual(out.tools, tools)
+  assert.match(out.tools[0].name, /^client_[a-f0-9]{40}$/); assert.equal(out.tools[0].description, 'Client tool "bash". Run a shell command.')
   assert.equal(out.instructions, "")
-  assert.deepEqual(out.input, [{ role: "system", content: "SYSTEM" }, ...input.filter(item => item.type !== "reasoning")])
+  assert.deepEqual(out.input.map(item => item.type ?? item.role), ["system", "user", "function_call", "function_call_output"])
+  assert.equal(out.input[2].name, out.tools[0].name)
+  assert.deepEqual(prepareAPIRequest({ instructions: "SYSTEM", input, tools }, { toolNames: "native" }).body.tools, tools)
   const stored = prepareAPIRequest({ instructions: "SYSTEM", previous_response_id: "resp_1", store: true, input: [{ role: "user", content: "NEXT" }] }).body
   assert.equal(stored.instructions, "SYSTEM"); assert.deepEqual(stored.input, [{ role: "user", content: "NEXT" }])
   const old = prepareAPIRequest({ instructions: "SYSTEM", input, tools }, { toolNames: "hashed", reasoningReplay: "keep", instructionsAs: "instructions" }).body
   assert.match(old.tools[0].name, /^client_[a-f0-9]{40}$/); assert.equal(old.instructions, "SYSTEM"); assert.equal(old.input.length, input.length)
-})
-
-test("a refused plain tool name is retried under aliases, and later requests alias from the start", async () => {
-  const sent = []
-  const transport = createAPITransport({ credential: async () => ({ type: "api", access: "test-only" }), request: async (_url, init) => {
-    const body = JSON.parse(init.body); sent.push(body)
-    if (body.tools[0].name === "bash") return Response.json({ error: { message: "Invalid function name 'bash'" } }, { status: 400 })
-    return Response.json({ output: [{ type: "function_call", name: body.tools[0].name, call_id: "c1", arguments: "{}" }] })
-  } })
-  const call = () => transport(META_API_BASE + "/responses", { method: "POST", body: JSON.stringify({ input: "go", tools: [{ type: "function", name: "bash" }] }) })
-  const first = await call()
-  assert.equal(first.status, 200); assert.equal((await first.json()).output[0].name, "bash")
-  assert.equal(sent.length, 2); assert.equal(sent[0].tools[0].name, "bash"); assert.match(sent[1].tools[0].name, /^client_[a-f0-9]{40}$/)
-  const second = await call()
-  assert.equal((await second.json()).output[0].name, "bash")
-  assert.equal(sent.length, 3); assert.match(sent[2].tools[0].name, /^client_[a-f0-9]{40}$/)
-  let other = 0
-  const plain = createAPITransport({ credential: async () => ({ type: "api", access: "test-only" }), request: async () => { other++; return Response.json({ error: { message: "quota exceeded" } }, { status: 400 }) } })
-  assert.equal((await plain(META_API_BASE + "/responses", { method: "POST", body: JSON.stringify({ input: "go", tools: [{ type: "function", name: "bash" }] }) })).status, 400)
-  assert.equal(other, 1)
 })

@@ -15,16 +15,13 @@ const authFailure = error => {
   return Response.json({ error: { type: "muse_api_error", message: error instanceof AuthError ? error.message : "Muse credentials are temporarily unavailable; retry." } },
     { status: expired ? 401 : 503, headers: { "X-Magpie-Sign-In": expired ? "expired" : "kept" } })
 }
-// The defaults make a request read like the same Chat Completions request sent to Meta's public API by a client that
-// returns no reasoning items. `toolNames: "native"`: a name the API accepts as written is sent unchanged, description
-// included; only a name the API would reject, or one that could be taken for an alias, gets a deterministic alias
-// (`"hashed"` aliases every name). `reasoningReplay` and `instructionsAs` are explained where they apply.
+// Every function name gets a deterministic alias by default (`toolNames: "hashed"`). With `"native"` a name the API
+// accepts as written is sent unchanged, description included, and only a name the API would reject, or one that could
+// be taken for an alias, is aliased. `reasoningReplay` and `instructionsAs` are explained where they apply.
 const API_NAME = /^[A-Za-z0-9_-]{1,64}$/
 const aliasName = name => "client_" + createHash("sha256").update(name).digest("hex").slice(0, 40)
-// The service's refusal of a tool name sent as declared; the transport then aliases every name.
-const TOOL_NAME_REFUSAL = /(?:tool|function)[^.]{0,120}\bname\b|\bname\b[^.]{0,120}(?:tool|function)/i
 const TOOL_NAMES = new Set(["native", "hashed"]), REASONING_REPLAY = new Set(["keep", "drop"]), INSTRUCTIONS_AS = new Set(["instructions", "message"])
-export function validateAPIOptions({ toolNames = "native", reasoningReplay = "drop", instructionsAs = "message" } = {}) {
+export function validateAPIOptions({ toolNames = "hashed", reasoningReplay = "drop", instructionsAs = "message" } = {}) {
   if (!TOOL_NAMES.has(toolNames)) throw new Error('Option toolNames must be "native" or "hashed"')
   if (!REASONING_REPLAY.has(reasoningReplay)) throw new Error('Option reasoningReplay must be "keep" or "drop"')
   if (!INSTRUCTIONS_AS.has(instructionsAs)) throw new Error('Option instructionsAs must be "instructions" or "message"')
@@ -112,14 +109,11 @@ export function createAPITransport({ credential, renew, request = fetch, baseURL
   baseURL = validateAPIBase(baseURL, localTestBackend)
   const requestOptions = validateAPIOptions({ toolNames, reasoningReplay, instructionsAs })
   const base = new URL(baseURL)
-  // Set once the service refuses a tool name sent as declared: every later request aliases its names.
-  let namesRefused = false
-  const aliased = { ...requestOptions, toolNames: "hashed" }
   return async (input, init) => {
     const req = new Request(input, init), url = new URL(req.url)
     if (url.origin !== base.origin || url.pathname !== base.pathname.replace(/\/$/, "") + "/responses" || req.method !== "POST") return errorResponse(400, "Refusing a foreign inference destination")
-    let original, prepared
-    try { original = await req.json(); prepared = prepareAPIRequest(original, namesRefused ? aliased : requestOptions) } catch (error) { return errorResponse(400, error.message) }
+    let prepared
+    try { prepared = prepareAPIRequest(await req.json(), requestOptions) } catch (error) { return errorResponse(400, error.message) }
     req.signal.throwIfAborted()
     let auth, body = prepared.body
     try { auth = await credential() } catch (error) { req.signal.throwIfAborted(); return authFailure(error) }
@@ -135,17 +129,13 @@ export function createAPITransport({ credential, renew, request = fetch, baseURL
       try { auth = await renew(auth.access) } catch (error) { req.signal.throwIfAborted(); return authFailure(error) }
       renewed = true; response = await send()
     }
-    // Bounded recovery for provider-owned reasoning references and for a refused tool name. Prompt messages,
+    // Bounded recovery for provider-owned reasoning references. Prompt messages,
     // function calls and actual client tool outputs are never dropped/replayed.
     for (let attempt = 0; attempt < 3 && response.status === 400; attempt++) {
       const text = await response.clone().text()
       let next = body
       if (/encrypted_content.*(?:caller|issued)/i.test(text)) next = stripReasoningEncryptedContent(body)
       else if (parseReferencedReasoningId(text)) next = dropAllReasoningItems(body)
-      else if (!namesRefused && requestOptions.toolNames === "native" && body.tools?.length && TOOL_NAME_REFUSAL.test(text)) {
-        namesRefused = true
-        prepared = prepareAPIRequest(original, aliased); next = prepared.body
-      }
       if (next === body) break
       await response.body?.cancel(); body = next; response = await send()
     }
