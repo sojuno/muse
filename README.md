@@ -69,18 +69,18 @@ Small live tests verified separate system/developer/user instructions on Spark a
 
 ## Matching a stateless Chat Completions route
 
-Three options, all off by default, change what reaches the model. Together they make a request through this plugin
-read like the same Chat Completions request sent to Meta's public API by a client that returns no reasoning items.
-Set them in the installed plugin's Options, for example `{ "toolNames": "native", "reasoningReplay": "drop", "instructionsAs": "message" }`.
+By default a request through this plugin reads like the same Chat Completions request sent to Meta's public API by
+a client that returns no reasoning items. Three options, set in the installed plugin's Options, restore the earlier
+behaviour one by one, for example `{ "reasoningReplay": "keep" }`.
 
 | Option | Default | Other value |
 | --- | --- | --- |
-| `toolNames` | `"hashed"`: every function name is sent under a `client_…` alias, with the original name in its description | `"native"`: a name the API accepts (`A-Z a-z 0-9 _ -`, at most 64 characters, not starting with `client_`) is sent exactly as declared, description unchanged; any other name is still aliased |
-| `reasoningReplay` | `"keep"`: sealed reasoning items in the request are sent | `"drop"`: no earlier reasoning item is sent; each request carries only the conversation's messages, tool calls and tool results |
-| `instructionsAs` | `"instructions"`: the system text stays in `instructions` | `"message"`: it is sent as the first message of `input` (role `system`) and `instructions` is left empty |
+| `toolNames` | `"native"`: a name the API accepts (`A-Z a-z 0-9 _ -`, at most 64 characters, not starting with `client_`) is sent exactly as declared, description unchanged; any other name gets a `client_…` alias with the original name in its description | `"hashed"`: every function name is sent under an alias |
+| `reasoningReplay` | `"drop"`: no earlier reasoning item is sent; each request carries only the conversation's messages, tool calls and tool results | `"keep"`: sealed reasoning items in the request are sent |
+| `instructionsAs` | `"message"`: the system text is sent as the first message of `input` (role `system`) and `instructions` is left empty; a request that continues a stored response keeps `instructions` | `"instructions"`: the system text stays in `instructions` |
 
-Aliases are restored in streamed and buffered responses under either `toolNames` value. Check `"native"` once with a
-signed-in account before relying on it: whether the service accepts every plain name has not been tested live.
+Aliases are restored in streamed and buffered responses. If the service refuses a tool name sent as declared, the
+request is retried once with every name aliased and later requests alias from the start.
 
 ## Token usage
 
