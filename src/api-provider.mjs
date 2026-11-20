@@ -69,10 +69,32 @@ export async function createAPIProvider(input = {}, options = {}) {
       },
     },
     auth: {
-      provider: ID, single: true, maxConcurrency: 8, refreshLead: 120000,
+      // Several accounts. magpie keeps each sign-in as its own account (the
+      // first under this provider's id, later ones under muse#xxxxxx), names
+      // one by its accountId — the subscription email set at sign-in — and
+      // spreads requests over the ticked accounts with its own routings. Every
+      // hook below runs in one account's scope: getAuth() returns that account
+      // and client.auth.set saves to it, so all per-account state here (usage
+      // windows, model discovery, the mint session) is keyed by the sign-in's
+      // own tokens, never shared across accounts.
+      provider: ID, maxConcurrency: 8, refreshLead: 120000,
       refresh: auth.refresh,
       methods: [
         { type: "oauth", label: "Muse subscription — device sign-in", authorize: auth.authorize },
+        {
+          // The quick way to add another account: paste another sign-in's
+          // credential file (or just its dca_token). The callback mints a
+          // fresh API key from it, which proves the DCA token still works
+          // before anything is saved. Minting does not rotate the DCA token,
+          // so the tool the file came from keeps working.
+          type: "oauth", label: "Import CLIProxyAPI / Muse CLI auth file", authorize: auth.authorizeImport,
+          prompts: [{
+            key: "auth", type: "password",
+            message: "Paste the CLIProxyAPI or Muse CLI Meta auth file (JSON), or just its dca_token",
+            placeholder: "dca:… or the whole auth JSON",
+            validate: auth.validateImport,
+          }],
+        },
         { type: "api", label: "Existing Meta/Muse API key" },
       ],
       async loader(getAuth) {

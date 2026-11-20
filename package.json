@@ -42,7 +42,7 @@
     "doctor": "magpie provider test muse"
   },
   "type": "module",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "engines": {
     "node": ">=22"
   },

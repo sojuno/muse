@@ -21,6 +21,7 @@ Current API coverage includes:
 - Exact instructions, developer/user input, mixed text/image ordering, function arguments/call ids/results, subsequent user messages and Contributor ids. No CLI transcript or system wrapper is added.
 - Original MCP/client function-name restoration in JSON and byte-split UTF-8/CRLF SSE, with reasoning and full usage retained.
 - Foreign inference destinations refused before credential access; redirects refused; local test backends reject real credentials. A 401 renews once, while 429 and missing stored context remain explicit errors.
+- Several accounts on one plugin instance, as magpie scopes them: each account's loader signs with its own key, one account's renewal mints and saves through `client.auth.set` into that account's slot only, usage answers per account's scope, and each sign-in method (device, import file, API key) names the account it adds by its email.
 - Actual Magpie/Bun translation for Chat Completions, Responses and Anthropic Messages, including complete tool-result loops. Controlled responses report prompt 20, output 7, cache read 8, cache write 3 and reasoning 2; each ledger row retains uncached input 9 and the other splits exactly.
 - Account-scoped model discovery, including simultaneous discoveries, and Contributor alias precedence. Existing OAuth-engine and archived CLI regressions are included in the total, which is not a count of live API requests.
 

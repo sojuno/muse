@@ -21,7 +21,15 @@ magpie plugin login muse
 magpie provider test muse
 ```
 
-Select **Muse (Subscription API)** in Magpie. Sign-in opens Meta's device authorization page; approve the displayed code with the intended account. Magpie stores the resulting credentials. This plugin does not read or change your Muse CLI login. An existing Meta/Muse API key is also supported through Magpie's second sign-in method.
+Select **Muse (Subscription API)** in Magpie. Sign-in opens Meta's device authorization page; approve the displayed code with the intended account. Magpie stores the resulting credentials. This plugin does not read or change your Muse CLI login. Two more ways to add an account: paste a CLIProxyAPI or Muse CLI Meta auth file (or just its `dca_token`) through the import method, which mints a fresh API key to prove the token still works; or use an existing Meta/Muse API key.
+
+## Multiple accounts
+
+Sign in again to add another account — `magpie plugin login muse` in a terminal, or the provider's sign-in button in the app. Magpie keeps each sign-in as its own account under the provider and spreads requests over the accounts you tick:
+
+- An account is named by the subscription email the key mint returns (`accountId`). Signing in an email that is already there replaces that account; a different email becomes a second account. The import method adds accounts the same way, one paste each.
+- Routing and failover are Magpie's: pick a routing for the provider's accounts (smart, order, drain, rotate, usage, pace, weight, fast) and a Stays setting; a rate limit or server error moves a request to the next account, and a 401 marks the account. `maxConcurrency` (8 by default) limits each account, so several accounts serve proportionally more requests in parallel.
+- Everything below the routing is per account: model discovery, the usage card and allowance windows, key renewal from the account's own DCA token, and the save of a rotated key — one account's renewal never writes another account's sign-in.
 
 When updating an existing checkout:
 

@@ -22,6 +22,7 @@ test("API OAuth uses the published device grant and an honest application identi
   const result = await flow.callback()
   assert.equal(result.type, "success")
   assert.equal(result.access, "test-only-minted")
+  assert.equal(result.accountId, "test@example.test", "the email names the account magpie keeps")
   assert.deepEqual(mock.calls.map(c => c.url), [DEVICE_AUTH_URL, TOKEN_URL, MINT_URL])
   for (const { init } of mock.calls) {
     assert.equal(init.headers.get("user-agent"), "magpie-muse/0.4.0")
