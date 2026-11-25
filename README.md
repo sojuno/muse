@@ -86,6 +86,22 @@ function name is sent under an alias. Each behaviour has an option, set in the i
 | `toolNames` | `"hashed"`: every function name is sent under a `client_…` alias, with the original name in its description | `"native"`: a name the API accepts (`A-Z a-z 0-9 _ -`, at most 64 characters, not starting with `client_`) is sent exactly as declared, description unchanged; any other name is still aliased |
 | `reasoningReplay` | `"drop"`: no earlier reasoning item is sent; each request carries only the conversation's messages, tool calls and tool results | `"keep"`: sealed reasoning items in the request are sent |
 | `instructionsAs` | `"message"`: the system text is sent as the first message of `input` (role `system`) and `instructions` is left empty; a request that continues a stored response keeps `instructions` | `"instructions"`: the system text stays in `instructions` |
+| `cutTurns` | `"continue"`: a cut turn (below) is continued once | `"pass"`: every response goes to the client exactly as Meta ended it |
+
+**Cut turns.** Wonder on this route sometimes ends a tool-using turn right after its opening sentence: the response is
+one message ("Opening that post now."), status `completed`, no function call, 0 reasoning tokens and a few dozen output
+tokens. A client that ends its turn on a text-only answer then stops before the act it announced. Sent again, the same
+request is almost never cut, and with the sentence appended as the assistant's message the model answers with exactly
+the call it announced. With `cutTurns: "continue"` the plugin recognises such a response (one `output_text` message of
+at most 1000 characters, nothing else but empty reasoning items, at most 100 output tokens, 0 reasoning tokens, tools
+offered and allowed, no `previous_response_id`) and sends the same request once more with the sentence appended. Only a
+bare, whole tool call is spliced in (completed, 0 reasoning tokens, no text, only calls of offered tools with a call id
+and JSON-object arguments): the client receives the sentence, the call's `output_item` and `function_call_arguments`
+events and one `response.completed` carrying both outputs, the first request's input counts and both requests' output
+counts. Anything else, a failure, or no answer within 180 s, and the client receives the response exactly as Meta ended
+it. Each cut turn writes one `console.warn` line (`magpie-muse: cut turn <id> ... continued: <tool>` or `... not
+continued: <why>`). A real short ending with no reasoning whose bare continuation is a tool call would be continued too;
+none was seen in the runs this was measured on.
 
 Aliases are restored in streamed and buffered responses. With a subscription key the service answers
 `403 client_attestation_denied` to a request that declares a tool under a name the Muse Code client uses itself (seen
