@@ -15,15 +15,21 @@ const authFailure = error => {
   return Response.json({ error: { type: "muse_api_error", message: error instanceof AuthError ? error.message : "Muse credentials are temporarily unavailable; retry." } },
     { status: expired ? 401 : 503, headers: { "X-Magpie-Sign-In": expired ? "expired" : "kept" } })
 }
-// Every function name gets a deterministic alias by default (`toolNames: "hashed"`). With `"native"` a name the API
-// accepts as written is sent unchanged, description included, and only a name the API would reject, or one that could
-// be taken for an alias, is aliased. `reasoningReplay` and `instructionsAs` are explained where they apply.
+// By default (`toolNames: "reserved"`) a name the API accepts as written is sent unchanged, description included, as a
+// Chat Completions route sends it; only the Muse Code client's own tool names (RESERVED_TOOL_NAMES), a name the API
+// would reject and one that could be taken for an alias get a deterministic alias. `"native"` aliases only the last
+// two, `"hashed"` every name. `reasoningReplay` and `instructionsAs` are explained where they apply.
 const API_NAME = /^[A-Za-z0-9_-]{1,64}$/
 const aliasName = name => "client_" + createHash("sha256").update(name).digest("hex").slice(0, 40)
-const TOOL_NAMES = new Set(["native", "hashed"]), REASONING_REPLAY = new Set(["keep", "drop"]), INSTRUCTIONS_AS = new Set(["instructions", "message"])
+const TOOL_NAMES = new Set(["reserved", "native", "hashed"]), REASONING_REPLAY = new Set(["keep", "drop"]), INSTRUCTIONS_AS = new Set(["instructions", "message"])
 const CUT_TURNS = new Set(["continue", "pass"])
-export function validateAPIOptions({ toolNames = "hashed", reasoningReplay = "drop", instructionsAs = "message", cutTurns = "continue" } = {}) {
-  if (!TOOL_NAMES.has(toolNames)) throw new Error('Option toolNames must be "native" or "hashed"')
+// `toolNames: "reserved"` sends a name as declared, as a Chat Completions route such as OpenRouter's does, except the
+// names a subscription key refuses because the Muse Code client uses them itself (`403 client_attestation_denied`,
+// seen live with `bash`): those, and any name the API would reject or that could be taken for an alias, are aliased.
+// A request refused all the same is sent again with every name aliased, and that tool set stays aliased.
+export const RESERVED_TOOL_NAMES = new Set(["bash", "read", "write", "edit"])
+export function validateAPIOptions({ toolNames = "reserved", reasoningReplay = "drop", instructionsAs = "message", cutTurns = "continue" } = {}) {
+  if (!TOOL_NAMES.has(toolNames)) throw new Error('Option toolNames must be "reserved", "native" or "hashed"')
   if (!REASONING_REPLAY.has(reasoningReplay)) throw new Error('Option reasoningReplay must be "keep" or "drop"')
   if (!INSTRUCTIONS_AS.has(instructionsAs)) throw new Error('Option instructionsAs must be "instructions" or "message"')
   if (!CUT_TURNS.has(cutTurns)) throw new Error('Option cutTurns must be "continue" or "pass"')
@@ -95,7 +101,9 @@ export function prepareAPIRequest(input, options) {
   const names = new Map(), reverse = new Map(), declared = new Set()
   const register = name => {
     if (typeof name !== "string" || !name) throw new Error("Function tools require a name")
-    const wire = toolNames === "native" && API_NAME.test(name) && !name.startsWith("client_") ? name : aliasName(name)
+    const asDeclared = API_NAME.test(name) && !name.startsWith("client_") &&
+      (toolNames === "native" || (toolNames === "reserved" && !RESERVED_TOOL_NAMES.has(name.toLowerCase())))
+    const wire = asDeclared ? name : aliasName(name)
     names.set(name, wire); reverse.set(wire, name)
     return wire
   }
@@ -252,11 +260,19 @@ export function createAPITransport({ credential, renew, request = fetch, baseURL
   baseURL = validateAPIBase(baseURL, localTestBackend)
   const requestOptions = validateAPIOptions({ toolNames, reasoningReplay, instructionsAs, cutTurns })
   const base = new URL(baseURL)
+  const say = log ?? (line => console.warn(line))
+  // The tool sets (their declared names) a subscription key refused under `toolNames: "reserved"`: sent aliased from then on.
+  const refusedToolSets = new Set()
+  const toolSet = value => Array.isArray(value?.tools) ? value.tools.map(tool => String(tool?.name)).sort().join("\n") : ""
   return async (input, init) => {
     const req = new Request(input, init), url = new URL(req.url)
     if (url.origin !== base.origin || url.pathname !== base.pathname.replace(/\/$/, "") + "/responses" || req.method !== "POST") return errorResponse(400, "Refusing a foreign inference destination")
-    let prepared
-    try { prepared = prepareAPIRequest(await req.json(), requestOptions) } catch (error) { return errorResponse(400, error.message) }
+    let prepared, raw, options = requestOptions
+    try {
+      raw = await req.json()
+      if (options.toolNames === "reserved" && refusedToolSets.has(toolSet(raw))) options = { ...options, toolNames: "hashed" }
+      prepared = prepareAPIRequest(raw, options)
+    } catch (error) { return errorResponse(400, error.message) }
     req.signal.throwIfAborted()
     let auth, body = prepared.body
     try { auth = await credential() } catch (error) { req.signal.throwIfAborted(); return authFailure(error) }
@@ -271,6 +287,15 @@ export function createAPITransport({ credential, renew, request = fetch, baseURL
       await response.body?.cancel()
       try { auth = await renew(auth.access) } catch (error) { req.signal.throwIfAborted(); return authFailure(error) }
       renewed = true; response = await send()
+    }
+    // A name the Muse Code client uses itself, declared as written, is refused on a subscription key. Under
+    // "reserved" that should not happen; if it does, the same request goes again with every name aliased.
+    if (response.status === 403 && options.toolNames === "reserved" && /client_attestation_denied/.test(await response.clone().text())) {
+      await response.body?.cancel()
+      refusedToolSets.add(toolSet(raw))
+      say(`magpie-muse: a tool declared under its own name was refused (client_attestation_denied); this tool set is sent aliased from now on: ${toolSet(raw).split("\n").join(", ")}`)
+      prepared = prepareAPIRequest(raw, { ...options, toolNames: "hashed" }); body = prepared.body
+      response = await send()
     }
     // Bounded recovery for provider-owned reasoning references. Prompt messages,
     // function calls and actual client tool outputs are never dropped/replayed.
@@ -293,6 +318,6 @@ export function createAPITransport({ credential, renew, request = fetch, baseURL
       const payload = { ...body, stream: false, input: [...history, { role: "assistant", content: [{ type: "output_text", text }] }] }
       return continuationResponse(await send(payload, untilEither(req.signal, CUT_CONTINUE_MS)), seen)
     }
-    return transformAPIResponse(new Response(response.body, { status: response.status, statusText: response.statusText, headers }), prepared.names, seen, continueTurn, log)
+    return transformAPIResponse(new Response(response.body, { status: response.status, statusText: response.statusText, headers }), prepared.names, seen, continueTurn, say)
   }
 }
