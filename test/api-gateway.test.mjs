@@ -102,7 +102,7 @@ test("direct API provider through real Magpie/Bun preserves prompts, tools, reas
       assert.ok(text.includes("SYS_API_")); assert.ok(text.includes("USER_API_"))
       assert.equal(text.includes("Continue the following conversation. Preserve its system/developer instructions."), false)
       assert.equal(text.includes("Your own workspace is an empty bridge directory"), false)
-      assert.equal(body.tools[0].name, "mcp__filesystem__read_file")  // toolNames "reserved": declared names stay
+      assert.match(body.tools[0].name, /^client_[a-f0-9]{40}$/)
       assert.equal(headers["user-agent"], "magpie-muse/0.4.0")
       assert.equal(headers["x-client-id"], undefined)
       assert.equal(body.model.startsWith("muse-"), true)

@@ -77,14 +77,13 @@ Small live tests verified separate system/developer/user instructions on Spark a
 
 ## What reaches the model
 
-By default no earlier reasoning item is sent, the client's system text is the first message of the conversation, and
-function names are sent as declared, as in the same Chat Completions request sent through OpenRouter by a client that
-returns no reasoning items; only the Muse Code client's own tool names are aliased, because a subscription key refuses
-them. Each behaviour has an option, set in the installed plugin's Options.
+By default no earlier reasoning item is sent and the client's system text is the first message of the conversation,
+as in the same Chat Completions request sent to Meta's public API by a client that returns no reasoning items. Every
+function name is sent under an alias. Each behaviour has an option, set in the installed plugin's Options.
 
 | Option | Default | Other value |
 | --- | --- | --- |
-| `toolNames` | `"reserved"`: a name the API accepts (`A-Z a-z 0-9 _ -`, at most 64 characters, not starting with `client_`) is sent exactly as declared, description unchanged, unless it is one of the Muse Code client's own tool names (`bash`, `read`, `write`, `edit`, any case), which goes under a `client_…` alias with the original name in its description; a request refused all the same with `403 client_attestation_denied` is sent again with every name aliased, and that tool set stays aliased while the plugin runs (one `console.warn` line) | `"native"`: as `"reserved"` but the Muse Code names too are sent as declared; `"hashed"`: every name is aliased (the earlier default) |
+| `toolNames` | `"hashed"`: every function name is sent under a `client_…` alias, with the original name in its description | `"native"`: a name the API accepts (`A-Z a-z 0-9 _ -`, at most 64 characters, not starting with `client_`) is sent exactly as declared, description unchanged; any other name is still aliased |
 | `reasoningReplay` | `"drop"`: no earlier reasoning item is sent; each request carries only the conversation's messages, tool calls and tool results | `"keep"`: sealed reasoning items in the request are sent |
 | `instructionsAs` | `"message"`: the system text is sent as the first message of `input` (role `system`) and `instructions` is left empty; a request that continues a stored response keeps `instructions` | `"instructions"`: the system text stays in `instructions` |
 | `cutTurns` | `"continue"`: a cut turn (below) is continued once | `"pass"`: every response goes to the client exactly as Meta ended it |
@@ -107,8 +106,7 @@ none was seen in the runs this was measured on.
 Aliases are restored in streamed and buffered responses. With a subscription key the service answers
 `403 client_attestation_denied` to a request that declares a tool under a name the Muse Code client uses itself (seen
 live with `bash`): its message says subscriptions cover the Muse Code client only and names a pay-as-you-go API key for
-other clients. `"native"` is therefore not usable with such tools on a subscription key; `"reserved"` aliases exactly
-those names and sends every other one as the client declared it.
+other clients. `"native"` is therefore not usable with such tools on a subscription key.
 
 ## Token usage
 
