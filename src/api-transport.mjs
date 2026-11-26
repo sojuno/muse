@@ -21,13 +21,14 @@ const authFailure = error => {
 const API_NAME = /^[A-Za-z0-9_-]{1,64}$/
 const aliasName = name => "client_" + createHash("sha256").update(name).digest("hex").slice(0, 40)
 const TOOL_NAMES = new Set(["native", "hashed"]), REASONING_REPLAY = new Set(["keep", "drop"]), INSTRUCTIONS_AS = new Set(["instructions", "message"])
-const CUT_TURNS = new Set(["continue", "pass"])
-export function validateAPIOptions({ toolNames = "hashed", reasoningReplay = "drop", instructionsAs = "message", cutTurns = "continue" } = {}) {
+const CUT_TURNS = new Set(["continue", "pass"]), CACHE_KEY = new Set(["conversation", "client"])
+export function validateAPIOptions({ toolNames = "hashed", reasoningReplay = "drop", instructionsAs = "message", cutTurns = "continue", cacheKey = "conversation" } = {}) {
   if (!TOOL_NAMES.has(toolNames)) throw new Error('Option toolNames must be "native" or "hashed"')
   if (!REASONING_REPLAY.has(reasoningReplay)) throw new Error('Option reasoningReplay must be "keep" or "drop"')
   if (!INSTRUCTIONS_AS.has(instructionsAs)) throw new Error('Option instructionsAs must be "instructions" or "message"')
   if (!CUT_TURNS.has(cutTurns)) throw new Error('Option cutTurns must be "continue" or "pass"')
-  return { toolNames, reasoningReplay, instructionsAs, cutTurns }
+  if (!CACHE_KEY.has(cacheKey)) throw new Error('Option cacheKey must be "conversation" or "client"')
+  return { toolNames, reasoningReplay, instructionsAs, cutTurns, cacheKey }
 }
 
 // A CUT TURN. On this route Wonder sometimes ends a tool-using turn right after its opening sentence: the response is
@@ -88,8 +89,25 @@ export function spliceCutTurn(cut, calls, continuation) {
   return { ...cut, output: [...cut.output, ...calls], usage }
 }
 
+// A CACHE KEY FOR THE CONVERSATION. Sent through a chat-completions gateway to Meta's public API, a conversation's
+// every later turn finds the previous request's prompt in cache, and the client sends nothing that names the
+// conversation. On this route a request finds its conversation's cached prefix only when the requests carry one
+// `prompt_cache_key`: measured on eight-turn tool conversations, 0 or 1 of the 6 or 7 later turns found a cached prefix
+// without a key and 4 to 6 with one. So, with `cacheKey: "conversation"`, a request that carries no key and continues no
+// stored response gets one made of what every turn of a conversation shares: the model, the system text and the
+// first user message. A key the client sent is always kept. Conversations that start alike share a key, and still
+// find their own prompts. The key changes nothing the model reads.
+export function conversationKey(body) {
+  if (!body || typeof body !== "object") return null
+  const input = Array.isArray(body.input) ? body.input : body.input == null ? [] : [{ role: "user", content: body.input }]
+  const first = input.find(item => item?.role === "user")
+  const system = typeof body.instructions === "string" && body.instructions !== "" ? body.instructions : input.find(item => item?.role === "system" || item?.role === "developer")?.content
+  if (first === undefined && system == null) return null
+  return "conv_" + createHash("sha256").update(JSON.stringify([body.model ?? null, system ?? null, first?.content ?? null])).digest("hex").slice(0, 40)
+}
+
 export function prepareAPIRequest(input, options) {
-  const { toolNames, reasoningReplay, instructionsAs } = validateAPIOptions(options)
+  const { toolNames, reasoningReplay, instructionsAs, cacheKey } = validateAPIOptions(options)
   const body = normalizeRequest(input)
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Expected a Responses request object")
   const names = new Map(), reverse = new Map(), declared = new Set()
@@ -117,7 +135,8 @@ export function prepareAPIRequest(input, options) {
   // request that continues a stored response keeps `instructions`: its earlier messages are already on the server.
   const asMessage = instructionsAs === "message" && body.previous_response_id == null && typeof body.instructions === "string" && body.instructions !== ""
   const items = !asMessage ? history : [{ role: "system", content: body.instructions }, ...(Array.isArray(history) ? history : history == null ? [] : [{ role: "user", content: history }])]
-  const prepared = { ...rest, ...(asMessage ? { instructions: "" } : {}), store: body.store ?? false, input: items, ...(body.tools ? { tools: choice === "none" ? [] : tools } : {}) }
+  const key = cacheKey === "conversation" && body.prompt_cache_key == null && body.previous_response_id == null ? conversationKey(body) : null
+  const prepared = { ...rest, ...(asMessage ? { instructions: "" } : {}), ...(key ? { prompt_cache_key: key } : {}), store: body.store ?? false, input: items, ...(body.tools ? { tools: choice === "none" ? [] : tools } : {}) }
   // `reasoningReplay: "drop"` sends no earlier reasoning item: the model then reads only the messages, tool calls
   // and tool results of the conversation, as it does behind a client that returns no reasoning items.
   return { body: reasoningReplay === "drop" ? dropAllReasoningItems(prepared) : dropBareReasoningItems(prepared), names: reverse }
@@ -248,9 +267,9 @@ async function continuationResponse(response, onEvent) {
   return completed
 }
 
-export function createAPITransport({ credential, renew, request = fetch, baseURL = META_API_BASE, localTestBackend = false, onEvent, toolNames, reasoningReplay, instructionsAs, cutTurns, log }) {
+export function createAPITransport({ credential, renew, request = fetch, baseURL = META_API_BASE, localTestBackend = false, onEvent, toolNames, reasoningReplay, instructionsAs, cutTurns, cacheKey, log }) {
   baseURL = validateAPIBase(baseURL, localTestBackend)
-  const requestOptions = validateAPIOptions({ toolNames, reasoningReplay, instructionsAs, cutTurns })
+  const requestOptions = validateAPIOptions({ toolNames, reasoningReplay, instructionsAs, cutTurns, cacheKey })
   const base = new URL(baseURL)
   return async (input, init) => {
     const req = new Request(input, init), url = new URL(req.url)

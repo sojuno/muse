@@ -15,7 +15,7 @@ const accountKey = auth => createHash("sha256").update(auth.access).digest("hex"
 export async function createAPIProvider(input = {}, options = {}) {
   const request = typeof options.request === "function" ? options.request : fetch
   const baseURL = validateAPIBase(options.localTestBackend ? options.baseURL : META_API_BASE, options.localTestBackend)
-  const requestOptions = validateAPIOptions({ toolNames: options.toolNames, reasoningReplay: options.reasoningReplay, instructionsAs: options.instructionsAs, cutTurns: options.cutTurns })
+  const requestOptions = validateAPIOptions({ toolNames: options.toolNames, reasoningReplay: options.reasoningReplay, instructionsAs: options.instructionsAs, cutTurns: options.cutTurns, cacheKey: options.cacheKey })
   const auth = createAPIAuth(input.client, request)
   const usage = new Map()
   const discoveries = new Map()

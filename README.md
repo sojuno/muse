@@ -87,6 +87,16 @@ function name is sent under an alias. Each behaviour has an option, set in the i
 | `reasoningReplay` | `"drop"`: no earlier reasoning item is sent; each request carries only the conversation's messages, tool calls and tool results | `"keep"`: sealed reasoning items in the request are sent |
 | `instructionsAs` | `"message"`: the system text is sent as the first message of `input` (role `system`) and `instructions` is left empty; a request that continues a stored response keeps `instructions` | `"instructions"`: the system text stays in `instructions` |
 | `cutTurns` | `"continue"`: a cut turn (below) is continued once | `"pass"`: every response goes to the client exactly as Meta ended it |
+| `cacheKey` | `"conversation"`: a request that carries no `prompt_cache_key` and continues no stored response gets one made of the model, the system text and the first user message, so every turn of a conversation carries the same key | `"client"`: only a key the client sent is forwarded |
+
+**Cache key.** Sent through a chat-completions gateway to Meta's public API, every later turn of a conversation finds
+the previous request's prompt in cache, and the client sends nothing that names the conversation. On this route a
+request finds its conversation's cached prefix only when the requests carry one `prompt_cache_key`: on eight-turn tool
+conversations, 0 or 1 of the 6 or 7 later turns found a cached prefix without a key, 4 to 6 with one, and three
+conversations sharing a head and a key still found their own prompts. With `cacheKey: "conversation"` the plugin
+supplies that key for a client that sends none; a client's own key is always kept, and the key changes nothing the
+model reads. With several accounts ticked, the prompt found is often two or three requests old, because each account
+keeps its own cache: one account per conversation finds the last one.
 
 **Cut turns.** Wonder on this route sometimes ends a tool-using turn right after its opening sentence: the response is
 one message ("Opening that post now."), status `completed`, no function call, 0 reasoning tokens and a few dozen output

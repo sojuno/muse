@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { MusePlugin } from "../plugin.mjs"
-import { createAPITransport, prepareAPIRequest, transformAPIResponse, META_API_BASE } from "../src/api-transport.mjs"
+import { createAPITransport, prepareAPIRequest, conversationKey, transformAPIResponse, META_API_BASE } from "../src/api-transport.mjs"
 import { AuthError } from "../oauth.mjs"
 
 test("API payload keeps system/developer/user instructions and tool results in their API fields", () => {
@@ -246,4 +246,29 @@ test("defaults send no earlier reasoning and the system text as a message, with 
   assert.equal(stored.instructions, "SYSTEM"); assert.deepEqual(stored.input, [{ role: "user", content: "NEXT" }])
   const old = prepareAPIRequest({ instructions: "SYSTEM", input, tools }, { toolNames: "hashed", reasoningReplay: "keep", instructionsAs: "instructions" }).body
   assert.match(old.tools[0].name, /^client_[a-f0-9]{40}$/); assert.equal(old.instructions, "SYSTEM"); assert.equal(old.input.length, input.length)
+})
+
+test("a conversation without a cache key gets one that every turn shares", () => {
+  const first = { instructions: "SYSTEM", model: "muse-wonder-1.0", input: [{ role: "user", content: "Begin." }] }
+  const later = { ...first, input: [...first.input, { type: "function_call", call_id: "c1", name: "bash", arguments: "{}" }, { type: "function_call_output", call_id: "c1", output: "ok" }, { role: "user", content: "Go on." }] }
+  const a = prepareAPIRequest(first).body.prompt_cache_key, b = prepareAPIRequest(later).body.prompt_cache_key
+  assert.match(a, /^conv_[a-f0-9]{40}$/); assert.equal(b, a); assert.equal(conversationKey(first), a)
+  // the same conversation whichever slot the system text is sent in, and when the input is a plain string
+  assert.equal(prepareAPIRequest(first, { instructionsAs: "instructions" }).body.prompt_cache_key, a)
+  assert.equal(prepareAPIRequest({ input: [{ role: "system", content: "SYSTEM" }, ...first.input], model: first.model }).body.prompt_cache_key, a)
+  assert.equal(prepareAPIRequest({ ...first, input: "Begin." }).body.prompt_cache_key, a)
+  // another first message, another system text or another model is another conversation
+  assert.notEqual(prepareAPIRequest({ ...first, input: [{ role: "user", content: "Begin again." }] }).body.prompt_cache_key, a)
+  assert.notEqual(prepareAPIRequest({ ...first, instructions: "OTHER" }).body.prompt_cache_key, a)
+  assert.notEqual(prepareAPIRequest({ ...first, model: "muse-spark-1.3" }).body.prompt_cache_key, a)
+  // the client's own key is kept; a request that continues a stored response, or has nothing to key on, gets none
+  assert.equal(prepareAPIRequest({ ...first, prompt_cache_key: "mine" }).body.prompt_cache_key, "mine")
+  assert.equal("prompt_cache_key" in prepareAPIRequest({ ...first, previous_response_id: "resp_1", store: true }).body, false)
+  assert.equal("prompt_cache_key" in prepareAPIRequest({}).body, false)
+  // the key adds nothing else to the request and the option turns it off
+  const { prompt_cache_key: _key, ...rest } = prepareAPIRequest(first).body
+  assert.deepEqual(rest, prepareAPIRequest(first, { cacheKey: "client" }).body)
+  assert.equal(prepareAPIRequest({ ...first, prompt_cache_key: "mine" }, { cacheKey: "client" }).body.prompt_cache_key, "mine")
+  assert.throws(() => prepareAPIRequest({}, { cacheKey: "always" }), /cacheKey/)
+  assert.throws(() => createAPITransport({ credential: async () => ({}), cacheKey: "always" }), /cacheKey/)
 })
